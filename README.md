@@ -38,13 +38,13 @@ python tja_sample.py
 ```
 ### ショートカットキー
 キー,機能
- - Ctrl+O,ファイルを開く
- - Ctrl+S,上書き保存
- - Ctrl+Shift+S,名前を付けて保存
- - Ctrl+F,検索
- - Ctrl+D,ダークモード切替
- - Ctrl+E,構文エラーチェック
- - F5,太鼓さん次郎でプレビュー
+ - `Ctrl+O`：ファイルを開く
+ - `Ctrl+S`：上書き保存
+ - `Ctrl+Shift+S`：名前を付けて保存
+ - `Ctrl+F`：検索
+ - `Ctrl+D`：ダークモード切替
+ - `Ctrl+E`：構文エラーチェック
+ - `F5`：太鼓さん次郎でプレビュー
 
 ## ライセンス
 MIT License
