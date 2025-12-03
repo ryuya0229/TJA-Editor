@@ -29,12 +29,12 @@
 
 ```bash
 pip install pydub librosa numpy matplotlib chardet
-
 ※ pydub は ffmpeg が必要です（Windows の場合は PATH に追加してください）
-
+```
+```
 起動方法
 python tja_sample.py
-
+```
 ショートカットキー
 キー,機能
 Ctrl+O,ファイルを開く
