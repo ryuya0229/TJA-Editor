@@ -31,11 +31,11 @@
 pip install pydub librosa numpy matplotlib chardet
 ※ pydub は ffmpeg が必要です（Windows の場合は PATH に追加してください）
 ```
-起動方法
+###起動方法
 ```bash
 python tja_sample.py
 ```
-ショートカットキー
+###ショートカットキー
 キー,機能
 Ctrl+O,ファイルを開く
 Ctrl+S,上書き保存
@@ -45,12 +45,12 @@ Ctrl+D,ダークモード切替
 Ctrl+E,構文エラーチェック
 F5,太鼓さん次郎でプレビュー
 
-ライセンス
+##ライセンス
 MIT License
 自由に使用・改変・再配布していただけます。
 修正版を公開される場合は、本リポジトリへの言及をしていただけると嬉しいです。
 
-貢献歓迎！
+##貢献歓迎！
 
 ・バグ報告
 ・機能追加提案
