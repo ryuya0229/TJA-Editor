@@ -1,6 +1,6 @@
 # TJA Editor
 
-![メイン画面](images/screenshot_main.png)
+![メイン画面]([images/screenshot_main.png](https://github.com/ryuya0229/TJA-Editor/blob/main/%E3%82%B9%E3%82%AF%E3%83%AA%E3%83%BC%E3%83%B3%E3%82%B7%E3%83%A7%E3%83%83%E3%83%88%202025-12-05%20115822.png))
 
 **TJA Editor** は、太鼓さん次郎・太鼓の達人用TJA譜面を快適に作成できる国産エディタです。  
 シンプルで高速、必要な機能はすべて揃っています。
