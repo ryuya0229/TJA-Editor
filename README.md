@@ -30,7 +30,7 @@
 ## インストール方法
 
 ```bash
-git clone https://github.com/あなたのユーザー名/TJA-Editor.git
+git clone https://github.com/ryuya0229/TJA-Editor.git
 cd TJA-Editor
 pip install numpy matplotlib chardet pydub librosa
 python tja_sample.py
