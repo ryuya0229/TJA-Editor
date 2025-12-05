@@ -101,9 +101,6 @@ class TJAEditor:
             self.root.deiconify()        # 即復帰でドキッとさせる
             # 10秒後に元に戻す（本物の公式っぽく）
             self.root.after(10000, lambda: self.root.title("TJA Editor"))
-            # ステータスバーに一瞬だけ痕跡を残す
-            self.status_bar.config(text="公式モード起動中...", fg="#00ff00")
-            self.root.after(3000, lambda: self.status_bar.config(text="", fg="black"))
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
