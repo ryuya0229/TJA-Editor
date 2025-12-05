@@ -20,7 +20,7 @@
 
 ## スクリーンショット
 
-![段位道場作成](images/screenshot_dan.png)
+![段位道場作成](https://github.com/ryuya0229/TJA-Editor/blob/main/screanshot1.png)
 
 ## 動作環境
 
