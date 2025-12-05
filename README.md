@@ -20,7 +20,6 @@
 
 ## スクリーンショット
 
-![ツールメニュー](images/screenshot_tools.png)
 ![段位道場作成](images/screenshot_dan.png)
 
 ## 動作環境
