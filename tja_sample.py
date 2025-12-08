@@ -5,14 +5,16 @@ from tkinter import Listbox, Scrollbar, Button, Entry, Label, Frame, LabelFrame,
 import numpy as np
 import matplotlib.pyplot as plt
 plt.rcParams["font.family"] = "MS Gothic"
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle, Rectangle, FancyBboxPatch
 import re
+import sys
 import os
 import tempfile
 import shutil
 import json
 import chardet
 import datetime
-import random
 
 try:
     from pydub import AudioSegment
@@ -46,7 +48,7 @@ class TJAEditor:
         self.root.geometry("1000x750")
         self.root.resizable(True, True)
         self.current_file = None
-        self.current_encoding = 'shift_jis'  # ← この行を追加
+        self.current_encoding = 'cp932'  # ← この行を追加
         self.dark_mode = False
         self.last_folder = os.path.expanduser("~")
         self.recent_files = []
@@ -94,13 +96,6 @@ class TJAEditor:
     
         self.text.bind("<Button-3>", show_popup)
         self.text.bind("<Control-Button-1>", show_popup)
-        # 隠し機能：1/1000の確率で「公式エディタ」になる（.py見られても100%カッコいい）
-        if random.random() < 0.001:  # 約0.1%の確率
-            self.root.title("太鼓の達人 公式譜面エディタ v9.99 (内部開発版)")
-            self.root.iconify()          # 一瞬最小化
-            self.root.deiconify()        # 即復帰でドキッとさせる
-            # 10秒後に元に戻す（本物の公式っぽく）
-            self.root.after(10000, lambda: self.root.title("TJA Editor"))
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
@@ -123,8 +118,6 @@ class TJAEditor:
     
         viewmenu = tk.Menu(menubar, tearoff=0)
         viewmenu.add_command(label="ダークモード切り替え", command=self.toggle_dark_mode, accelerator="Ctrl+D")
-        viewmenu.add_separator()
-        viewmenu.add_command(label="太鼓さん次郎のパスを再設定...", command=self.reset_taikojiro_path)
         menubar.add_cascade(label="表示", menu=viewmenu)
     
         headermenu = tk.Menu(menubar, tearoff=0)
@@ -157,6 +150,9 @@ class TJAEditor:
         notemenu.add_command(label="#GOGOSTART", command=lambda: self.insert_syntax("#GOGOSTART\n"))
         notemenu.add_command(label="#GOGOEND", command=lambda: self.insert_syntax("#GOGOEND\n"))
         notemenu.add_command(label="#BRANCHSTART", command=self.insert_branchstart)
+        notemenu.add_command(label="#BARLINEON",   command=lambda: self.insert_syntax("#BARLINEON\n"))
+        notemenu.add_command(label="#BARLINEOFF",  command=lambda: self.insert_syntax("#BARLINEOFF\n"))
+        notemenu.add_command(label="#SECTION",     command=lambda: self.insert_syntax("#SECTION\n"))
         notemenu.add_command(label="#N", command=lambda: self.insert_syntax("#N\n"))
         notemenu.add_command(label="#E", command=lambda: self.insert_syntax("#E\n"))
         notemenu.add_command(label="#M", command=lambda: self.insert_syntax("#M\n"))
@@ -175,17 +171,64 @@ class TJAEditor:
         menubar.add_cascade(label="段位道場", menu=dojomenu)
         
         toolmenu = tk.Menu(menubar, tearoff=0)
+        # ========== 音源・タイミング調整 ==========
+        audio_menu = tk.Menu(toolmenu, tearoff=0)
         if PYDUB_AVAILABLE:
-            toolmenu.add_command(label="OFFSET自動計測(WAV/OGG対応)", command=self.auto_measure_offset_ogg)
-            toolmenu.add_command(label="OFFSET自動調節(波形表示+精密調整)", command=self.auto_adjust_offset)
+            audio_menu.add_command(label="OFFSET自動計測(WAV/OGG対応)", 
+                                  command=self.auto_measure_offset_ogg)
+            audio_menu.add_command(label="OFFSET自動調節(波形表示+精密調整)", 
+                                  command=self.auto_adjust_offset)
         else:
-            toolmenu.add_command(label="OFFSET自動計測(無効・pydub未導入)",
-                                 command=lambda: messagebox.showwarning("機能無効", "pydub がインストールされていないため利用できません"))
-            toolmenu.add_separator()
-        toolmenu.add_command(label="太鼓さん次郎でプレビュー再生 (F5)", command=self.preview_play, accelerator="F5")
-        toolmenu.add_command(label="AI添削(TODO)", command=self.ai_autoreview)
+            audio_menu.add_command(label="OFFSET自動計測(無効・pydub未導入)",
+                                  command=lambda: messagebox.showwarning(
+                                      "機能無効", 
+                                      "pydub がインストールされていないため利用できません"))  
+        toolmenu.add_cascade(label="音源・タイミング", menu=audio_menu)
+        
         toolmenu.add_separator()
-        toolmenu.add_command(label="配布用ZIPを作成…",command=self.create_distribution_zip,accelerator="Ctrl+E")
+        
+        # ========== プレビュー・再生 ==========
+        preview_menu = tk.Menu(toolmenu, tearoff=0)
+        preview_menu.add_command(label="太鼓さん次郎でプレビュー再生 (F5)", 
+                                command=self.preview_play, 
+                                accelerator="F5")
+        preview_menu.add_separator()
+        preview_menu.add_command(label="太鼓さん次郎のパスを再設定...", 
+                                command=self.reset_taikojiro_path)
+        
+        toolmenu.add_cascade(label="プレビュー・再生", menu=preview_menu)
+        
+        toolmenu.add_separator()
+        
+        # ========== 譜面分析・検証 ==========
+        analysis_menu = tk.Menu(toolmenu, tearoff=0)
+        analysis_menu.add_command(label="AI添削(ヒューリスティック分析)", 
+                                 command=self.ai_autoreview)
+        analysis_menu.add_separator()
+        analysis_menu.add_command(label="統計情報を表示", 
+                                 command=lambda: messagebox.showinfo(
+                                     "統計", 
+                                     "右側パネルに各難易度の統計が表示されています"))
+        
+        toolmenu.add_cascade(label="譜面分析・検証", menu=analysis_menu)
+        
+        toolmenu.add_separator()
+        
+        # ========== ファイル管理・配布 ==========
+        file_manage_menu = tk.Menu(toolmenu, tearoff=0)
+        file_manage_menu.add_command(label="配布用ZIPを作成…", 
+                                    command=self.create_distribution_zip,
+                                    accelerator="Ctrl+E")
+        file_manage_menu.add_separator()
+        file_manage_menu.add_command(label="バックアップフォルダを開く", 
+                                    command=self.open_backup_folder)
+        file_manage_menu.add_command(label="バックアップ履歴を表示・復元...", 
+                            command=self.show_backup_history)
+        file_manage_menu.add_separator()
+        file_manage_menu.add_command(label="譜面を画像化（太鼓風）", 
+                                    command=self.export_chart_image)
+        toolmenu.add_cascade(label="ファイル管理", menu=file_manage_menu)
+        
         menubar.add_cascade(label="ツール", menu=toolmenu)
 
         # ヘルプメニュー追加（最後に追加するのが自然）
@@ -227,6 +270,380 @@ class TJAEditor:
         except Exception as e:
             print(f"設定保存エラー: {e}")
             
+    def open_backup_folder(self):
+        """自動バックアップフォルダをエクスプローラーで開く"""
+        if not self.current_file:
+            messagebox.showwarning("未保存", "ファイルを保存してください")
+            return
+        
+        backup_dir = os.path.join(os.path.dirname(self.current_file), ".backup")
+        
+        if not os.path.exists(backup_dir):
+            messagebox.showinfo("バックアップなし", 
+                               "まだバックアップが作成されていません")
+            return
+        
+        # OS別でフォルダを開く
+        if os.name == "nt":  # Windows
+            os.startfile(backup_dir)
+        elif os.name == "posix":  # macOS/Linux
+            import subprocess
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", backup_dir])
+
+    def export_chart_image(self):
+        """太鼓の達人風の譜面画像を生成"""
+        if not self.current_file:
+            messagebox.showwarning("未保存", "ファイルを保存してから実行してください")
+            return
+        
+        content = self.text.get("1.0", tk.END)
+        chart_data = self._parse_chart_for_taiko_image(content)
+        
+        if not chart_data:
+            messagebox.showwarning("譜面なし", "譜面データが見つかりません")
+            return
+        
+        self._generate_taiko_style_image(chart_data)
+    
+    def _parse_chart_for_taiko_image(self, content):
+        """TJA内容から太鼓風画像用データを抽出(BALLOON値をヘッダーから確実に取得)"""
+        lines = content.splitlines()
+        
+        title = "無題"
+        subtitle = ""
+        level = "?"
+        bpm = 120.0
+        course = "鬼"
+        balloon_values = []  # ← BALLOON値のリスト
+        
+        chart_measures = []
+        in_chart = False
+        gogo_mode = False
+        current_bpm = 120.0
+        
+        for line in lines:
+            s = line.strip()
+            
+            # コメント行は無視
+            if s.startswith("//") or s.startswith(";"):
+                continue
+            
+            # ヘッダー情報取得
+            if s.upper().startswith("TITLE:"):
+                title = s.split(":", 1)[1].strip()
+            elif s.upper().startswith("SUBTITLE:"):
+                subtitle = s.split(":", 1)[1].strip()
+            elif s.upper().startswith("LEVEL:"):
+                level = s.split(":", 1)[1].strip()
+            elif s.upper().startswith("BPM:"):
+                try:
+                    bpm = float(s.split(":", 1)[1].strip())
+                    current_bpm = bpm
+                except:
+                    pass
+            elif s.upper().startswith("COURSE:"):
+                c = s.split(":", 1)[1].strip()
+                course_map = {"0":"かんたん","1":"ふつう","2":"むずかしい","3":"鬼","4":"裏鬼",
+                             "easy":"かんたん","normal":"ふつう","hard":"むずかしい","oni":"鬼","edit":"裏鬼"}
+                course = course_map.get(c.lower(), c)
+            elif s.upper().startswith("BALLOON:"):
+                # ← BALLOON値を取得(コメント除去も実施)
+                balloon_str = s.split(":", 1)[1]
+                # コメント除去(//, ; の前まで)
+                balloon_str = re.split(r"//|;", balloon_str)[0].strip()
+                # カンマ区切りで分割して数値のみ抽出
+                balloon_values = []
+                for v in balloon_str.split(","):
+                    v_clean = v.strip()
+                    if v_clean.isdigit():
+                        balloon_values.append(v_clean)
+            
+            # 譜面開始
+            if s.upper() in ["#START", "#P1START", "#P2START"]:
+                in_chart = True
+                continue
+            elif s.upper() in ["#END", "#P1END", "#P2END"]:
+                break
+            
+            if not in_chart:
+                continue
+            
+            # コマンド処理
+            if s.upper() == "#GOGOSTART":
+                gogo_mode = True
+                continue
+            elif s.upper() == "#GOGOEND":
+                gogo_mode = False
+                continue
+            elif s.upper().startswith("#BPMCHANGE"):
+                try:
+                    current_bpm = float(s.split()[1])
+                except:
+                    pass
+                continue
+            
+            # 譜面行を解析
+            if "," in s:
+                notes_part = s.split(",")[0]
+                # コメント除去
+                notes_part = re.split(r"//|;", notes_part)[0].strip()
+                
+                if notes_part:  # 空でなければ追加
+                    chart_measures.append({
+                        "notes": notes_part,
+                        "is_gogo": gogo_mode,
+                        "bpm": current_bpm
+                    })
+        
+        return {
+            "title": title,
+            "subtitle": subtitle,
+            "level": level,
+            "bpm": bpm,
+            "course": course,
+            "measures": chart_measures,
+            "balloon_values": balloon_values  # ← BALLOON値を返す
+        }
+    
+    def _generate_taiko_style_image(self, data):
+        """太鼓の達人風の譜面画像を生成(改善版 - 小節またぎ対応)"""
+        
+        # 画像サイズ計算
+        num_measures = len(data['measures'])
+        measures_per_row = 4  # 1行あたり4小節
+        num_rows = (num_measures + measures_per_row - 1) // measures_per_row
+        
+        fig_width = 14  # ← 幅を狭くして小節間隔を詰める
+        row_height = 1.0
+        title_height = 0.5
+        fig_height = title_height + num_rows * row_height + 0.3
+        
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        fig.patch.set_facecolor('#d0d0d0')
+        ax.set_facecolor('#d0d0d0')
+        
+        # ← 左端余白(小節番号用のスペース)
+        left_margin = 0.4
+        
+        # タイトル背景
+        title_y = num_rows * row_height
+        title_bg = Rectangle((left_margin, title_y), fig_width - left_margin, title_height, 
+                             facecolor='#4a4a4a', edgecolor='none', zorder=1)
+        ax.add_patch(title_bg)
+        
+        # タイトルとサブタイトルを組み合わせて表示
+        if data['subtitle']:
+            full_title = f"{data['title']} {data['subtitle']}"
+        else:
+            full_title = data['title']
+        
+        ax.text(left_margin + 0.3, title_y + title_height * 0.65, full_title, 
+                fontsize=18, fontweight='bold', color='white',
+                ha='left', va='center')
+        
+        # レベル表示(★)- 右寄せ
+        if data['level'].isdigit():
+            level_int = int(data['level'])
+            stars = '★' * level_int + '☆' * (10 - level_int)
+        else:
+            stars = data['level']
+        
+        ax.text(fig_width - 0.3, title_y + title_height * 0.65, 
+                f"{data['course']}  {stars}",
+                fontsize=14, color='white', ha='right', va='center')
+        
+        # 譜面描画の設定
+        measure_width = (fig_width - left_margin) / measures_per_row
+        note_y = 0.5  # ノーツの基準Y座標
+        
+        balloon_index = 0  # ← 風船のインデックス
+        balloon_values = data.get('balloon_values', [])
+        
+        for idx, measure in enumerate(data['measures']):
+            row = num_rows - 1 - (idx // measures_per_row)
+            col = idx % measures_per_row
+            
+            x_start = left_margin + col * measure_width
+            y_start = row * row_height
+            
+            # 背景(ゴーゴータイム)
+            if measure['is_gogo']:
+                gogo_bg = Rectangle((x_start, y_start), measure_width, row_height,
+                                   facecolor='#ffcccc', edgecolor='none', alpha=0.6, zorder=0)
+                ax.add_patch(gogo_bg)
+            else:
+                normal_bg = Rectangle((x_start, y_start), measure_width, row_height,
+                                     facecolor='#e0e0e0', edgecolor='none', zorder=0)
+                ax.add_patch(normal_bg)
+            
+            # 譜面ライン
+            line_y = y_start + note_y
+            ax.plot([x_start, x_start + measure_width], [line_y, line_y],
+                   color='#808080', linewidth=3, zorder=1)
+            
+            # 小節線(左端) ← 太くして視認性向上
+            ax.plot([x_start, x_start], [y_start + 0.15, y_start + 0.85],
+                   color='white', linewidth=4, zorder=2)
+            
+            # 小節番号表示(4小節ごと)
+            measure_num = idx + 1
+            if measure_num % 4 == 1:
+                ax.text(left_margin * 0.5, y_start + 0.5, str(measure_num),
+                       fontsize=9, color='#333333', ha='center', va='center',
+                       fontweight='bold',
+                       bbox=dict(boxstyle='round,pad=0.25', facecolor='white', 
+                                edgecolor='#cccccc', linewidth=1.5, alpha=0.9))
+            
+            # ノーツ配置(48分対応 + 小節またぎ考慮)
+            notes = measure['notes']
+            if not notes:
+                continue
+            
+            # ← 音符の密度を計算
+            note_count = len(notes)
+            non_zero_count = sum(1 for n in notes if n != '0')
+            density = non_zero_count / note_count if note_count > 0 else 0
+            
+            # 密度が高い場合は間隔を詰める
+            spacing_factor = 0.5 if density > 0.25 else 1.0
+            
+            # ← 小節末尾に音符があるかチェック
+            has_end_note = False
+            for i in range(len(notes) - 1, max(len(notes) - 4, -1), -1):  # 後ろ3文字をチェック
+                if notes[i] != '0':
+                    has_end_note = True
+                    break
+            
+            # 次の小節の先頭に音符があるかチェック
+            next_has_start_note = False
+            if idx + 1 < len(data['measures']):
+                next_notes = data['measures'][idx + 1]['notes']
+                for i in range(min(3, len(next_notes))):  # 先頭3文字をチェック
+                    if next_notes[i] != '0':
+                        next_has_start_note = True
+                        break
+            
+            # ← 小節またぎの音符がある場合は余白なし、それ以外は2%の余白
+            if has_end_note and next_has_start_note:
+                measure_usage = 1.0  # 余白なし(小節またぎ対応)
+            else:
+                measure_usage = 0.98  # わずかな余白(2%)
+            
+            note_positions = []
+            lcm = 192  # 4,8,16,32,48の最小公倍数
+            
+            for i, note in enumerate(notes):
+                if note != '0':  # 休符以外
+                    # 192分音符基準での位置(0.0~1.0の範囲)
+                    base_position = (i * lcm // note_count) / lcm
+                    # ← 最初の音符は小節線上、その後は密集
+                    position = base_position * spacing_factor * measure_usage
+                    note_positions.append((position, note, i))
+            
+            for position, note, original_idx in note_positions:
+                x = x_start + position * measure_width
+                y = y_start + note_y
+                
+                if note == '1':  # ドン(小)
+                    circle = Circle((x, y), 0.06, facecolor='#ff4444',
+                                   edgecolor='#cc0000', linewidth=2, zorder=3)
+                    ax.add_patch(circle)
+                    
+                elif note == '2':  # カツ(小)
+                    circle = Circle((x, y), 0.06, facecolor='#4488ff',
+                                   edgecolor='#0044cc', linewidth=2, zorder=3)
+                    ax.add_patch(circle)
+                    
+                elif note == '3':  # ドン(大)
+                    circle = Circle((x, y), 0.10, facecolor='#ff4444',
+                                   edgecolor='#ffdd00', linewidth=3.5, zorder=3)
+                    ax.add_patch(circle)
+                    
+                elif note == '4':  # カツ(大)
+                    circle = Circle((x, y), 0.10, facecolor='#4488ff',
+                                   edgecolor='#ffdd00', linewidth=3.5, zorder=3)
+                    ax.add_patch(circle)
+                    
+                elif note == '5':  # 連打開始
+                    end_idx = original_idx + 1
+                    while end_idx < len(notes) and notes[end_idx] not in ['6', '8']:
+                        end_idx += 1
+                    
+                    if end_idx < len(notes):
+                        end_base_position = (end_idx * lcm // note_count) / lcm
+                        end_position = end_base_position * spacing_factor * measure_usage
+                        x_end = x_start + end_position * measure_width
+                        renda_width = x_end - x
+                        
+                        renda_rect = FancyBboxPatch((x, y - 0.05), renda_width, 0.10,
+                                                   boxstyle="round,pad=0.01",
+                                                   facecolor='#ffdd00', edgecolor='#ff8800',
+                                                   linewidth=2.5, zorder=2)
+                        ax.add_patch(renda_rect)
+                        
+                elif note == '7':  # 風船 ← 数値表示追加
+                    circle = Circle((x, y), 0.08, facecolor='#ff88ff',
+                                   edgecolor='#cc00cc', linewidth=2.5, zorder=3)
+                    ax.add_patch(circle)
+                    
+                    # ← BALLOON値を取得して表示
+                    if balloon_index < len(balloon_values):
+                        balloon_text = balloon_values[balloon_index]
+                        ax.text(x, y, balloon_text, fontsize=6, ha='center', va='center',
+                               color='white', fontweight='bold', zorder=4)
+                        balloon_index += 1
+                    else:
+                        # 値がない場合は「風」と表示
+                        ax.text(x, y, '風', fontsize=5, ha='center', va='center',
+                               color='white', fontweight='bold', zorder=4)
+                    
+                elif note == '9':  # 芋(大連打)
+                    end_idx = original_idx + 1
+                    while end_idx < len(notes) and notes[end_idx] not in ['6', '8']:
+                        end_idx += 1
+                    
+                    if end_idx < len(notes):
+                        end_base_position = (end_idx * lcm // note_count) / lcm
+                        end_position = end_base_position * spacing_factor * measure_usage
+                        x_end = x_start + end_position * measure_width
+                        imo_width = x_end - x
+                        
+                        imo_rect = FancyBboxPatch((x, y - 0.07), imo_width, 0.14,
+                                                 boxstyle="round,pad=0.015",
+                                                 facecolor='#ffff00', edgecolor='#ff4400',
+                                                 linewidth=3, zorder=2)
+                        ax.add_patch(imo_rect)
+        
+        # 軸設定
+        ax.set_xlim(0, fig_width)
+        ax.set_ylim(0, num_rows * row_height + title_height + 0.1)
+        ax.set_aspect('equal', adjustable='box')
+        ax.axis('off')
+        
+        # 保存
+        default_filename = f"{data['title']}_{data['course']}.png"
+        default_filename = re.sub(r'[\\/:*?"<>|]', '', default_filename)
+        
+        output_path = filedialog.asksaveasfilename(
+            title="譜面画像を保存",
+            defaultextension=".png",
+            filetypes=[("PNG画像", "*.png"), ("JPEG画像", "*.jpg")],
+            initialfile=default_filename
+        )
+        
+        if output_path:
+            plt.tight_layout(pad=0.2)
+            plt.savefig(output_path, dpi=200, facecolor='#d0d0d0', bbox_inches='tight')
+            plt.close()
+            
+            messagebox.showinfo("保存完了", 
+                               f"譜面画像を保存しました:\n{os.path.basename(output_path)}\n\n"
+                               f"小節数: {num_measures}\n"
+                               f"解像度: {int(fig_width * 200)} × {int(fig_height * 200)} px")
+            
+            if os.name == "nt":
+                os.startfile(output_path)
+
     def apply_dark_mode(self):
         """ダークモードの見た目を強制的に適用（起動時用）"""
         if self.dark_mode:
@@ -1212,7 +1629,7 @@ class TJAEditor:
                     backup_dir = os.path.join(os.path.dirname(self.current_file), ".backup")
                     os.makedirs(backup_dir, exist_ok=True)
                     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                    backup_name = f"{os.path.basename(self.current_file)}.{ts}"
+                    backup_name = f"{ts}_{os.path.basename(self.current_file)}"  # ← ここを変更
                     shutil.copy2(self.current_file, os.path.join(backup_dir, backup_name))
     
                 # ← 読み込んだエンコーディングで保存
@@ -1221,13 +1638,12 @@ class TJAEditor:
     
                 self.text.edit_modified(False)
                 messagebox.showinfo("保存完了", "上書き保存しました♪\n自動バックアップも作成済みです")
-                self.ai_assistant.log_action("save_file", {"path": self.current_file})
                 self.update_all()
             except Exception as e:
                 messagebox.showerror("保存エラー", f"保存に失敗しました…\n{e}")
         else:
             self.save_as_file()
-
+        
     def save_as_file(self):
         file_path = filedialog.asksaveasfilename(initialdir=self.last_folder, defaultextension=".tja", filetypes=[("TJA files", "*.tja")])
         if file_path:
@@ -1252,6 +1668,111 @@ class TJAEditor:
                 self.update_recent_menu()
             except Exception as e:
                 messagebox.showerror("エラー", f"保存失敗\n{e}")
+
+    def show_backup_history(self):
+        """バックアップ履歴を見やすく表示して復元可能にする"""
+        if not self.current_file:
+            messagebox.showwarning("未保存", "ファイルを保存してください")
+            return
+        
+        backup_dir = os.path.join(os.path.dirname(self.current_file), ".backup")
+        if not os.path.exists(backup_dir):
+            messagebox.showinfo("バックアップなし", "まだバックアップが作成されていません")
+            return
+        
+        # 現在のファイル名に関連するバックアップだけ抽出
+        current_basename = os.path.basename(self.current_file)
+        backups = []
+        for fname in os.listdir(backup_dir):
+            if fname.endswith(current_basename):
+                full_path = os.path.join(backup_dir, fname)
+                # タイムスタンプ部分を抽出（例: "2025-12-05_14-30-45"）
+                timestamp_str = fname.split("_")[0] + "_" + fname.split("_")[1]
+                try:
+                    # 人間が読みやすい形式に変換
+                    dt = datetime.datetime.strptime(timestamp_str, "%Y-%m-%d_%H-%M-%S")
+                    display_time = dt.strftime("%Y年%m月%d日 %H:%M:%S")
+                    backups.append((display_time, full_path))
+                except:
+                    pass
+        
+        if not backups:
+            messagebox.showinfo("バックアップなし", f"{current_basename} のバックアップはありません")
+            return
+        
+        # 新しい順にソート
+        backups.sort(reverse=True)
+        
+        # ダイアログ表示
+        win = Toplevel(self.root)
+        win.title(f"バックアップ履歴 - {current_basename}")
+        win.geometry("600x400")
+        win.transient(self.root)
+        
+        Label(win, text=f"「{current_basename}」のバックアップ履歴", 
+              font=("メイリオ", 12, "bold")).pack(pady=10)
+        
+        frame = Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        scrollbar = Scrollbar(frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = Listbox(frame, yscrollcommand=scrollbar.set, 
+                         font=("MS Gothic", 10), selectmode="single")
+        for display_time, _ in backups:
+            listbox.insert("end", display_time)
+        listbox.pack(fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        def restore_backup():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("未選択", "復元するバックアップを選択してください", parent=win)
+                return
+            
+            selected_time, selected_path = backups[sel[0]]
+            
+            if not messagebox.askyesno(
+                "復元確認",
+                f"以下のバックアップを復元しますか？\n\n"
+                f"【復元元】\n{selected_time}\n\n"
+                f"※現在の編集内容は失われます（上書き保存していれば別のバックアップに残ります）",
+                parent=win
+            ):
+                return
+            
+            try:
+                with open(selected_path, 'r', encoding=self.current_encoding, errors='replace') as f:
+                    content = f.read()
+                
+                self.text.delete("1.0", tk.END)
+                self.text.insert("1.0", content)
+                self.text.edit_modified(False)
+                
+                win.destroy()
+                messagebox.showinfo("復元完了", f"{selected_time} のバックアップを復元しました")
+                self.update_all()
+                
+            except Exception as e:
+                messagebox.showerror("復元エラー", f"バックアップの復元に失敗しました\n{e}", parent=win)
+        
+        def open_folder():
+            if os.name == "nt":
+                os.startfile(backup_dir)
+            else:
+                import subprocess
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", backup_dir])
+        
+        btn_frame = Frame(win)
+        btn_frame.pack(pady=10)
+        
+        Button(btn_frame, text="復元", command=restore_backup, width=12, 
+               font=("メイリオ", 10)).pack(side="left", padx=5)
+        Button(btn_frame, text="フォルダを開く", command=open_folder, width=14, 
+               font=("メイリオ", 10)).pack(side="left", padx=5)
+        Button(btn_frame, text="閉じる", command=win.destroy, width=12, 
+               font=("メイリオ", 10)).pack(side="left", padx=5)
 
     def open_search(self):
         # すでにウィンドウが存在する場合は最前面に持ってくるだけ
