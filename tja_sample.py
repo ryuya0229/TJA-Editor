@@ -9,7 +9,6 @@ import re
 import sys
 import subprocess
 import os
-import tempfile
 import shutil
 import json
 import chardet
@@ -185,7 +184,8 @@ class TJAEditor:
         toolmenu.add_command(label="太鼓さん次郎のパスを再設定...", command=self.reset_taikojiro_path)
         toolmenu.add_separator()
         # ========== 譜面分析・検証 ==========
-        toolmenu.add_command(label="AI添削(ヒューリスティック分析)", command=self.ai_autoreview)     
+        toolmenu.add_command(label="AI添削(ヒューリスティック分析)", command=self.ai_autoreview)
+        toolmenu.add_command(label="エラーチェック", command=self.check_errors, accelerator="Ctrl+Shift+E")  # ← 追加
         toolmenu.add_separator()
         
         # ========== ファイル管理・配布 ==========
@@ -857,6 +857,7 @@ class TJAEditor:
         self.root.bind_all("<Control-s>", lambda e: self.save_file())
         self.root.bind_all("<Control-Shift-s>", lambda e: self.save_as_file())
         self.root.bind_all("<Control-f>", lambda e: self.open_search())
+        self.root.bind_all("<Control-Shift-E>", lambda e: self.check_errors())
         self.root.bind_all("<Control-d>", lambda e: self.toggle_dark_mode())
         self.root.bind_all("<Control-e>", lambda e: self.check_syntax_errors())  # ← 追加
         self.root.bind("<F5>", lambda event: self.preview_play())
@@ -1179,6 +1180,163 @@ class TJAEditor:
             base += " ●"   # 変更があるときは ● を付ける（お好みで * でもOK）
         self.root.title(base)
         
+    def check_errors(self):
+        """譜面の一般的なエラーを自動検出"""
+        content = self.text.get("1.0", tk.END)
+        if not content.strip():
+            messagebox.showinfo("エラーチェック", "譜面が空です。")
+            return
+        
+        lines = content.splitlines()
+        errors = []
+        
+        # エラー検出ロジック
+        start_count = 0
+        end_count = 0
+        in_chart = False
+        has_course = False
+        has_level = False
+        
+        # コースごとの風船管理
+        current_course = "未定義"
+        course_balloons = {}  # {course: balloon_count}
+        course_balloon_defs = {}  # {course: balloon_defined}
+        current_balloon_count = 0
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            upper = stripped.upper()
+            
+            # 1. #START/#END の対応チェック
+            if upper in ["#START", "#P1START", "#P2START"]:
+                if in_chart:
+                    errors.append((i, "警告", "#START が閉じられていません（二重開始）"))
+                start_count += 1
+                in_chart = True
+                current_balloon_count = 0  # コースごとにリセット
+            elif upper in ["#END", "#P1END", "#P2END"]:
+                if not in_chart:
+                    errors.append((i, "エラー", "#END に対応する #START がありません"))
+                end_count += 1
+                in_chart = False
+                # コース終了時に風船数を記録
+                if current_course not in course_balloons:
+                    course_balloons[current_course] = 0
+                course_balloons[current_course] += current_balloon_count
+            
+            # 2. COURSE 切り替え
+            if upper.startswith("COURSE:"):
+                has_course = True
+                course_value = stripped[7:].strip().upper()
+                # 数字を名前に変換
+                course_map = {"0": "EASY", "1": "NORMAL", "2": "HARD", "3": "ONI", "4": "EDIT"}
+                current_course = course_map.get(course_value, course_value)
+            
+            # 3. LEVEL の存在チェック
+            if upper.startswith("LEVEL:"):
+                has_level = True
+            
+            # 4. 全角数字チェック（譜面行）
+            if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
+                if any(c in "０１２３４５６７８９" for c in stripped):
+                    errors.append((i, "エラー", "全角数字が含まれています（半角に修正してください）"))
+            
+            # 5. 風船カウント（風船は7のみ、譜面行のみ）
+            if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
+                current_balloon_count += stripped.count("7")
+            
+            # 6. BALLOON定義チェック（コースごと）
+            if upper.startswith("BALLOON:"):
+                balloon_values = stripped[8:].strip()
+                balloon_defined = len([v for v in balloon_values.split(",") if v.strip().isdigit()])
+                if current_course not in course_balloon_defs:
+                    course_balloon_defs[current_course] = 0
+                course_balloon_defs[current_course] += balloon_defined
+        
+        # 7. #START/#END の数の一致チェック
+        if start_count != end_count:
+            errors.append((0, "エラー", f"#START({start_count}個) と #END({end_count}個) の数が一致しません"))
+        
+        # 8. COURSE/LEVEL 未定義チェック
+        if not has_course:
+            errors.append((0, "警告", "COURSE: が定義されていません"))
+        if not has_level:
+            errors.append((0, "警告", "LEVEL: が定義されていません"))
+        
+        # 9. コースごとの風船の個数チェック
+        for course in set(list(course_balloons.keys()) + list(course_balloon_defs.keys())):
+            balloon_count = course_balloons.get(course, 0)
+            balloon_defined = course_balloon_defs.get(course, 0)
+            
+            if balloon_count > 0 and balloon_defined == 0:
+                errors.append((0, "警告", f"[{course}] 風船(7)が{balloon_count}個ありますが、BALLOON: が定義されていません"))
+            elif balloon_count != balloon_defined and balloon_defined > 0:
+                errors.append((0, "警告", f"[{course}] 風船の個数({balloon_count}個) と BALLOON: の定義数({balloon_defined}個) が一致しません"))
+        
+        # 10. カンマの連続チェック
+        for i, line in enumerate(lines, 1):
+            if ",," in line:
+                errors.append((i, "警告", "カンマが連続しています（空の小節）"))
+        
+        # 結果表示
+        if not errors:
+            messagebox.showinfo("エラーチェック", "エラーは見つかりませんでした！\n譜面は正常です。")
+            return
+        
+        # エラーウィンドウを表示
+        self.show_error_window(errors)
+    
+    def show_error_window(self, errors):
+        """エラー一覧ウィンドウを表示"""
+        win = Toplevel(self.root)
+        win.title(f"エラーチェック結果 - {len(errors)}件")
+        win.geometry("800x500")
+        win.transient(self.root)
+        
+        Label(win, text=f"検出されたエラー: {len(errors)}件", 
+              font=("メイリオ", 12, "bold")).pack(pady=10)
+        
+        frame = Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        scrollbar = Scrollbar(frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = Listbox(frame, yscrollcommand=scrollbar.set, 
+                         font=("MS Gothic", 10), selectmode="single")
+        
+        for line_num, error_type, message in errors:
+            if line_num == 0:
+                display = f"[{error_type}] 全体: {message}"
+            else:
+                display = f"[{error_type}] 行{line_num}: {message}"
+            listbox.insert("end", display)
+        
+        listbox.pack(fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        def jump_to_error():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            line_num, error_type, message = errors[sel[0]]
+            if line_num > 0:
+                self.text.see(f"{line_num}.0")
+                self.text.mark_set("insert", f"{line_num}.0")
+                self.text.tag_remove("sel", "1.0", "end")
+                self.text.tag_add("sel", f"{line_num}.0", f"{line_num}.end")
+                win.destroy()
+        
+        listbox.bind("<Double-Button-1>", lambda e: jump_to_error())
+        
+        btn_frame = Frame(win)
+        btn_frame.pack(pady=10)
+        
+        Button(btn_frame, text="該当行にジャンプ", command=jump_to_error, 
+               width=18, font=("メイリオ", 10)).pack(side="left", padx=5)
+        Button(btn_frame, text="閉じる", command=win.destroy, 
+               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
+
     def show_version(self):
         version_info = """
         TJA Editor
