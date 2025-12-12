@@ -14,7 +14,6 @@ import json
 import chardet
 import datetime
 
-# pydubやlibrosaなどの条件付きインポートは既存のコードのままで維持
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
@@ -26,7 +25,6 @@ try:
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
-
 
 class TJAEditor:
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tja_editor_config.json")
@@ -48,7 +46,7 @@ class TJAEditor:
         self.root.geometry("1000x750")
         self.root.resizable(False, False)
         self.current_file = None
-        self.current_encoding = 'cp932'  # ← この行を追加
+        self.current_encoding = 'cp932'
         self.dark_mode = False
         self.last_folder = os.path.expanduser("~")
         self.recent_files = []
@@ -63,9 +61,9 @@ class TJAEditor:
         self.search_window = None
         # フォント設定(全環境対応)
         if "BIZ UDPゴシック" in tkfont.families():
-            self.main_font = ("BIZ UDPゴシック", 15)
+            self.main_font = ("BIZ UDPゴシック", 16)
         elif "Yu Gothic UI" in tkfont.families():
-            self.main_font = ("Yu Gothic UI", 15)
+            self.main_font = ("Yu Gothic UI", 16)
         else:
             self.main_font = ("Consolas", 14)
         self._create_menu()
@@ -75,6 +73,9 @@ class TJAEditor:
         self.song_settings_frame = None
         self.load_config() 
         self.text.bind("<Return>", self.smart_comma_on_enter)
+        # 行番号のクリックイベント
+        self.linenumbers.bind("<Button-1>", self.on_linenumber_click)
+        self.linenumbers.bind("<B1-Motion>", self.on_linenumber_drag)
         self.popup = tk.Menu(self.text, tearoff=0)
     
         self.popup.add_command(label="元に戻す          Ctrl+Z", command=lambda: self.text.event_generate("<<Undo>>"))
@@ -118,7 +119,10 @@ class TJAEditor:
         viewmenu = tk.Menu(menubar, tearoff=0)
         self.viewmenu = viewmenu  # メニューを保存
         viewmenu.add_command(label="ダークモードに切り替え", command=self.toggle_dark_mode, accelerator="Ctrl+D")
-        viewmenu.add_command(label="フォント設定", command=self.open_font_settings)
+        # グリッド線の表示/非表示
+        self.show_grid = tk.BooleanVar(value=False)
+        viewmenu.add_checkbutton(label="配置グリッド線を表示", variable=self.show_grid, 
+                                 command=self.toggle_grid_lines)
         menubar.add_cascade(label="表示", menu=viewmenu)
     
         headermenu = tk.Menu(menubar, tearoff=0)
@@ -187,7 +191,6 @@ class TJAEditor:
         toolmenu.add_command(label="太鼓さん次郎のパスを再設定...", command=self.reset_taikojiro_path)
         toolmenu.add_separator()
         # ========== 譜面分析・検証 ==========
-        toolmenu.add_command(label="AI添削(ヒューリスティック分析)", command=self.ai_autoreview)
         toolmenu.add_command(label="エラーチェック", command=self.check_errors, accelerator="Ctrl+Shift+E")
         toolmenu.add_command(label="TODO管理", command=self.open_todo_manager, accelerator="Ctrl+T")
         toolmenu.add_separator()
@@ -209,7 +212,118 @@ class TJAEditor:
         helpmenu.add_command(label="このエディタについて", command=self.show_about)
         menubar.add_cascade(label="ヘルプ", menu=helpmenu)
         self.root.config(menu=menubar)
+
+    def _create_widgets(self):
+        main_frame = tk.Frame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.linenumbers = tk.Canvas(main_frame, width=80, bg="white", highlightthickness=0)
+        self.linenumbers.pack(side=tk.LEFT, fill=tk.Y)
+    
+        center_frame = tk.Frame(main_frame)
+        center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    
         
+    
+        count_frame = tk.Frame(center_frame, width=230, bg="#f0f0f0", relief="sunken", bd=2)
+        count_frame.pack(side=tk.RIGHT, fill=tk.Y)
+        count_frame.pack_propagate(False)
+    
+        self.count_frame = count_frame
+    
+        title_lbl = tk.Label(count_frame, text="■ 各難易度統計 ■", bg="#f0f0f0", 
+                             font=("メイリオ", 11, "bold"), fg="#333333")
+        title_lbl.pack(pady=(10, 5))
+    
+        self.count_text = tk.Text(count_frame, width=30, height=28,
+                                  font=("Courier New", 11), 
+                                  bg="#f0f0f0", fg="#000000",
+                                  relief="flat", state="disabled",
+                                  wrap="none")
+        self.count_text.pack(padx=10, pady=(0, 10), expand=True, fill=tk.BOTH)
+    
+        # ========== 左側のメインエディタ ==========
+        text_container = tk.Frame(center_frame)
+        text_container.pack(fill=tk.BOTH, expand=True)
+        
+        # 横スクロールバー用のフレーム
+        hscroll_frame = tk.Frame(center_frame)
+        hscroll_frame.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        hscroll = ttk.Scrollbar(hscroll_frame, orient=tk.HORIZONTAL)
+        hscroll.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # 縦スクロールバーの幅分の余白(右下の角を空ける)
+        corner_spacer = tk.Frame(hscroll_frame, width=15)
+        corner_spacer.pack(side=tk.RIGHT)
+        
+        vscroll = ttk.Scrollbar(text_container, orient=tk.VERTICAL)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.text = tk.Text(text_container, yscrollcommand=vscroll.set, xscrollcommand=hscroll.set,
+                            undo=True, maxundo=self.MAX_UNDO, font=self.main_font, wrap=tk.NONE)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    
+        vscroll.config(command=self.text.yview)
+        self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
+        hscroll.config(command=self.text.xview)
+        vscroll.config(command=self.sync_scroll)  # この行を変更
+        self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
+        hscroll.config(command=self.text.xview)
+        
+        # ========== ステータスバー ==========
+        self.statusbar = tk.Label(self.root, text="準備完了", relief=tk.SUNKEN, anchor="w", font=("MS Gothic", 10))
+        self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
+    
+        self.text.tag_configure("search", background="yellow", foreground="black")
+        
+        # ========== 構文ハイライト設定 ==========
+        # ヘッダー行（青）
+        self.text.tag_configure("header", foreground="#0066cc", font=(self.main_font[0], self.main_font[1], "bold"))
+        # コメント（グレー）
+        self.text.tag_configure("comment", foreground="#6a9955", font=(self.main_font[0], self.main_font[1], "italic"))
+        # コマンド行（紫）
+        self.text.tag_configure("command", foreground="#c586c0", font=(self.main_font[0], self.main_font[1], "bold"))
+        # エラー行（赤下線）
+        self.text.tag_configure("error", foreground="#ff0000", underline=True)
+        # TODO（黄色背景）
+        self.text.tag_configure("todo", background="#fff9c4", foreground="#000000")
+        # 譜面行（通常のまま）
+        # 数値（オレンジ）
+        self.text.tag_configure("number", foreground="#b5cea8")
+        
+        # 起動後に1回だけ行番号更新
+        self.root.after(100, self.update_linenumbers)
+
+    def _bind_events(self):
+        self.root.bind_all("<Control-o>", lambda e: self.open_file())
+        self.root.bind_all("<Control-s>", lambda e: self.save_file())
+        self.root.bind_all("<Control-Shift-s>", lambda e: self.save_as_file())
+        self.root.bind_all("<Control-f>", lambda e: self.open_search())
+        self.root.bind_all("<Control-d>", lambda e: self.toggle_dark_mode())
+        self.root.bind_all("<Control-e>", lambda e: self.check_syntax_errors())
+        self.root.bind_all("<Control-Shift-P>", lambda e: self.open_command_palette())
+        self.root.bind("<F5>", lambda event: self.preview_play())
+        self.root.bind_all("<Control-e>", lambda e: self.create_distribution_zip())
+        self.root.bind_all("<Control-Shift-E>", lambda e: self.check_errors())
+        self.root.bind_all("<Control-t>", lambda e: self.open_todo_manager())
+        
+        # キー入力中もリアルタイムで行番号を更新
+        self.text.bind("<Key>", lambda e: self.root.after_idle(self.update_linenumbers))
+        self.text.bind("<KeyRelease>", lambda e: (self.root.after_idle(self.update_all), self.on_text_change()))
+        
+        self.text.bind("<ButtonRelease>", lambda e: self.root.after_idle(self.update_linenumbers))
+        self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
+        
+        # マウスホイール
+        self.text.bind("<MouseWheel>", lambda e: (
+            self.text.yview_scroll(-int(e.delta/120), "units"),
+            self.update_linenumbers()
+        ) or "break")
+        self.text.bind("<Shift-MouseWheel>", lambda e: self.text.xview_scroll(-int(e.delta/120), "units") or "break")
+        self.statusbar.config(text="準備完了 | F5: プレビュー再生")
+        self.text.bind("<<Modified>>", self._on_text_modified)
+
     def load_config(self):
         """起動時に設定を読み込む（recent_filesも確実に反映）"""
         if os.path.exists(self.CONFIG_FILE):
@@ -234,14 +348,169 @@ class TJAEditor:
             "recent_files": self.recent_files,
             "dark_mode": self.dark_mode,
             "last_folder": self.last_folder,
-            "taikojiro_path": self.get_taikojiro_path()
+            "taikojiro_path": self.get_taikojiro_path(),
         }
         try:
             with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"設定保存エラー: {e}")
+            print(f"設定保存エラー: {e}")    
+    
+    def apply_dark_mode(self):
+        """ダークモードの見た目を強制的に適用（起動時用）"""
+        if self.dark_mode:
+            self.toggle_dark_mode(force=True)
+        else:
+            self.toggle_dark_mode(force=False)    
+    
+    def toggle_grid_lines(self):
+        """グリッド線の表示/非表示を切り替え"""
+        if self.show_grid.get():
+            self.draw_grid_lines()
+        else:
+            self.clear_grid_lines()
+    
+    def clear_grid_lines(self):
+        """グリッド線を完全にクリア"""
+        # すべてのグリッド関連タグを削除
+        grid_tags = ["grid_line_quarter", "grid_line_eighth", "grid_line_sixteenth"]
+        
+        for tag in grid_tags:
+            # タグを完全に削除
+            self.text.tag_remove(tag, "1.0", "end")
             
+            # タグ設定をリセット（重要！）
+            self.text.tag_configure(tag, background="")
+        
+        # Textウィジェットの更新を強制
+        self.text.update_idletasks()
+    
+    def draw_grid_lines(self):
+        """グリッド線を描画（コメント行対応版）"""
+        self.clear_grid_lines()
+        
+        # BPMチェック
+        bpm = self.get_current_bpm()
+        if bpm is None:
+            messagebox.showinfo("グリッド線", "BPM:が見つかりません。\nBPMを設定してください。")
+            self.show_grid.set(False)
+            return
+        
+        content = self.text.get("1.0", tk.END)
+        lines = content.splitlines()
+        
+        in_chart = False
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            upper = stripped.upper()
+            
+            # 譜面開始
+            if upper in ["#START", "#P1START", "#P2START"]:
+                in_chart = True
+                continue
+            
+            # 譜面終了
+            if upper in ["#END", "#P1END", "#P2END"]:
+                in_chart = False
+                continue
+            
+            # 譜面内かつ譜面行のみにグリッド線を表示
+            if in_chart:
+                # 行全体がコメントの場合はスキップ
+                if not stripped or stripped.startswith("//") or stripped.startswith(";"):
+                    continue
+                
+                # 行の先頭が#で始まる命令文もスキップ
+                if stripped.startswith("#"):
+                    continue
+                
+                # 行内コメントを除去して譜面部分のみを取得
+                # "//" または ";" 以降を除去
+                chart_part = line
+                for comment_marker in ["//", ";"]:
+                    if comment_marker in chart_part:
+                        chart_part = chart_part.split(comment_marker)[0]
+                
+                # コメント除去後の文字列をチェック
+                chart_part_stripped = chart_part.strip()
+                if not chart_part_stripped:
+                    continue  # コメントのみの行
+                
+                # カンマを除いた文字列から数字をチェック
+                clean_line = chart_part.replace(",", "").replace(" ", "").replace("\t", "")
+                note_count = len([c for c in clean_line if c in "0123456789"])
+                
+                if note_count > 0:
+                    # この小節の長さを計算
+                    line_length = len(clean_line)
+                    
+                    # 16分音符単位でグリッドを描画（4/4拍子を仮定）
+                    # 1小節最大16文字（16分音符×16）
+                    for pos in range(0, line_length, 4):  # 4文字ごと（4分音符単位）
+                        if pos < len(chart_part):
+                            start_idx = f"{i}.{pos}"
+                            end_idx = f"{i}.{pos+1}"
+                            
+                            # 4分音符の位置（濃いマーカー）
+                            if pos % 16 == 0:
+                                self.text.tag_add("grid_line_quarter", start_idx, end_idx)
+                            # 8分音符の位置（中間マーカー）
+                            elif pos % 8 == 0:
+                                self.text.tag_add("grid_line_eighth", start_idx, end_idx)
+                            # 16分音符の位置（薄いマーカー）
+                            else:
+                                self.text.tag_add("grid_line_sixteenth", start_idx, end_idx)
+        
+        # グリッド線のスタイル設定
+        self.configure_grid_styles()
+    
+    def configure_grid_styles(self):
+        """グリッド線のスタイルを設定"""
+        if self.dark_mode:
+            # ダークモード
+            self.text.tag_configure("grid_line_quarter", background="#3a3a3a")
+            self.text.tag_configure("grid_line_eighth", background="#2d2d2d")
+            self.text.tag_configure("grid_line_sixteenth", background="#252525")
+        else:
+            # ライトモード
+            self.text.tag_configure("grid_line_quarter", background="#e0e0e0")
+            self.text.tag_configure("grid_line_eighth", background="#eeeeee")
+            self.text.tag_configure("grid_line_sixteenth", background="#f5f5f5")
+    
+    def get_current_bpm(self):
+        """現在のBPMを取得（コース対応版）"""
+        content = self.text.get("1.0", tk.END)
+        
+        # カーソル位置のコースを特定
+        cursor_line = int(self.text.index(tk.INSERT).split('.')[0])
+        lines = content.splitlines()
+        
+        current_bpm = None
+        current_course = None
+        target_course = None
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip().upper()
+            
+            # COURSE検出
+            if stripped.startswith("COURSE:"):
+                current_course = stripped[7:].strip()
+            
+            # BPM検出
+            if stripped.startswith("BPM:"):
+                try:
+                    current_bpm = float(stripped[4:].strip())
+                except:
+                    current_bpm = None
+            
+            # カーソルがこのコース内かチェック
+            if i + 1 == cursor_line:
+                target_course = current_course
+                break
+        
+        return current_bpm  # 簡易版：最後に見つけたBPMを返す
+                
     def open_backup_folder(self):
         """自動バックアップフォルダをエクスプローラーで開く"""
         if not self.current_file:
@@ -595,209 +864,6 @@ class TJAEditor:
             self.text.see(tk.INSERT)
             self.bpm_window.destroy()
             messagebox.showinfo("挿入完了", f"BPM:{rounded_bpm} を挿入しました！")
-
-    def open_font_settings(self):
-        """フォント設定ウィンドウを開く"""
-        if hasattr(self, 'font_window') and self.font_window and self.font_window.winfo_exists():
-            self.font_window.lift()
-            return
-        
-        self.font_window = Toplevel(self.root)
-        self.font_window.title("フォント設定")
-        self.font_window.geometry("600x600")
-        self.font_window.resizable(False, False)
-        self.font_window.transient(self.root)
-        
-        # 現在のフォント情報を取得
-        current_font = self.main_font
-        current_family = current_font[0] if isinstance(current_font, tuple) else "Consolas"
-        current_size = current_font[1] if isinstance(current_font, tuple) and len(current_font) > 1 else 15
-        
-        # 説明
-        Label(self.font_window, text="エディタのフォント設定", 
-              font=("メイリオ", 14, "bold")).pack(pady=15)
-        
-        # 設定フレーム
-        settings_frame = Frame(self.font_window)
-        settings_frame.pack(pady=20, padx=30, fill="x")
-        
-        # フォントファミリー選択
-        Label(settings_frame, text="フォント:", font=("メイリオ", 11)).grid(row=0, column=0, sticky="e", padx=10, pady=10)
-        
-        # システムにインストールされているフォントを取得
-        available_fonts = sorted(list(tkfont.families()))
-        
-        # 等幅フォント推奨リスト（一般的なもの）
-        monospace_fonts = ["Consolas", "Courier New", "Monaco", "Menlo", "DejaVu Sans Mono", 
-                          "Liberation Mono", "Courier", "MS Gothic", "MS Mincho", 
-                          "BIZ UDゴシック", "BIZ UDPゴシック", "Source Code Pro", "Fira Code"]
-        
-        # 推奨フォントを先頭に配置
-        recommended = [f for f in monospace_fonts if f in available_fonts]
-        others = [f for f in available_fonts if f not in monospace_fonts]
-        font_list = recommended + ["---"] + others
-        
-        self.font_combo = ttk.Combobox(settings_frame, values=font_list, 
-                                       state="readonly", width=30, font=("メイリオ", 10))
-        self.font_combo.set(current_family)
-        self.font_combo.grid(row=0, column=1, sticky="w", padx=10, pady=10)
-        self.font_combo.bind("<<ComboboxSelected>>", lambda e: self.update_font_preview())
-        
-        # フォントサイズ選択
-        Label(settings_frame, text="サイズ:", font=("メイリオ", 11)).grid(row=1, column=0, sticky="e", padx=10, pady=10)
-        
-        sizes = list(range(8, 73, 2))  # 8, 10, 12, ... 72
-        self.size_combo = ttk.Combobox(settings_frame, values=sizes, 
-                                       state="readonly", width=10, font=("メイリオ", 10))
-        self.size_combo.set(current_size)
-        self.size_combo.grid(row=1, column=1, sticky="w", padx=10, pady=10)
-        self.size_combo.bind("<<ComboboxSelected>>", lambda e: self.update_font_preview())
-        
-        Label(settings_frame, text="pt", font=("メイリオ", 10)).grid(row=1, column=2, sticky="w")
-        
-        # プレビューエリア
-        preview_frame = LabelFrame(self.font_window, text="プレビュー", 
-                                  font=("メイリオ", 11), padx=10, pady=10)
-        preview_frame.pack(pady=20, padx=30, fill="both", expand=True)
-        
-        self.preview_text = tk.Text(preview_frame, width=50, height=10, wrap="none")
-        self.preview_text.pack(fill="both", expand=True)
-        
-        # サンプルテキスト
-        sample = """TITLE:サンプル譜面
-    SUBTITLE:--フォントプレビュー--
-    BPM:120
-    OFFSET:0.0
-    COURSE:Oni
-    LEVEL:10
-    
-    #START
-    1111,
-    2222,
-    12121212,
-    #END"""
-        
-        self.preview_text.insert("1.0", sample)
-        self.preview_text.config(state="disabled")
-        
-        # 初期プレビュー表示
-        self.update_font_preview()
-        
-        # ボタンフレーム
-        btn_frame = Frame(self.font_window)
-        btn_frame.pack(pady=20)
-        
-        Button(btn_frame, text="適用", command=self.apply_font_settings,
-               width=12, font=("メイリオ", 10), bg="#4CAF50", fg="white").pack(side="left", padx=5)
-        Button(btn_frame, text="デフォルトに戻す", command=self.reset_font_settings,
-               width=15, font=("メイリオ", 10)).pack(side="left", padx=5)
-        Button(btn_frame, text="キャンセル", command=self.font_window.destroy,
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
-    
-    def update_font_preview(self):
-        """プレビューのフォントを更新"""
-        selected_font = self.font_combo.get()
-        selected_size = self.size_combo.get()
-        
-        if selected_font == "---":
-            return
-        
-        try:
-            size = int(selected_size)
-            preview_font = (selected_font, size)
-            self.preview_text.config(font=preview_font)
-        except:
-            pass
-    
-    def apply_font_settings(self):
-        """フォント設定を適用"""
-        selected_font = self.font_combo.get()
-        selected_size = self.size_combo.get()
-        
-        if selected_font == "---":
-            messagebox.showwarning("無効な選択", "有効なフォントを選択してください。", 
-                                  parent=self.font_window)
-            return
-        
-        try:
-            size = int(selected_size)
-            new_font = (selected_font, size)
-            
-            # メインテキストエリアに適用
-            self.main_font = new_font
-            self.text.config(font=self.main_font)
-            
-            # 設定を保存
-            self.save_font_config(selected_font, size)
-            
-            # 行番号も更新
-            self.update_linenumbers()
-            
-            messagebox.showinfo("適用完了", "フォント設定を適用しました！", 
-                               parent=self.font_window)
-            self.font_window.destroy()
-            
-        except Exception as e:
-            messagebox.showerror("エラー", f"フォント設定の適用に失敗しました。\n{e}", 
-                                parent=self.font_window)
-    
-    def reset_font_settings(self):
-        """フォント設定をデフォルトに戻す"""
-        if messagebox.askyesno("確認", "フォント設定をデフォルトに戻しますか？", 
-                              parent=self.font_window):
-            # デフォルトフォントの決定
-            if "BIZ UDPゴシック" in tkfont.families():
-                default_font = "BIZ UDPゴシック"
-            elif "Yu Gothic UI" in tkfont.families():
-                default_font = "Yu Gothic UI"
-            else:
-                default_font = "Consolas"
-            
-            default_size = 15
-            
-            self.font_combo.set(default_font)
-            self.size_combo.set(default_size)
-            self.update_font_preview()
-    
-    def save_font_config(self, font_family, font_size):
-        """フォント設定をconfigファイルに保存"""
-        config = {}
-        if os.path.exists(self.CONFIG_FILE):
-            try:
-                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            except:
-                pass
-        
-        config["font_family"] = font_family
-        config["font_size"] = font_size
-        
-        try:
-            with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"フォント設定保存エラー: {e}")
-    
-    def load_font_config(self):
-        """起動時にフォント設定を読み込む"""
-        if os.path.exists(self.CONFIG_FILE):
-            try:
-                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    font_family = config.get("font_family")
-                    font_size = config.get("font_size")
-                    
-                    if font_family and font_size:
-                        self.main_font = (font_family, font_size)
-            except Exception as e:
-                print(f"フォント設定読み込みエラー: {e}")
-
-    def apply_dark_mode(self):
-        """ダークモードの見た目を強制的に適用（起動時用）"""
-        if self.dark_mode:
-            self.toggle_dark_mode(force=True)
-        else:
-            self.toggle_dark_mode(force=False)
         
     def auto_adjust_offset(self):
         wave_path = self.find_wave_path()
@@ -1041,220 +1107,6 @@ class TJAEditor:
                 # 万が一のエラーでもクラッシュしないように
                 print(f"[SmartComma] Error: {e}")
                 return None
-
-    def ai_autoreview(self):
-        """
-        AI風（ヒューリスティック）自動添削。
-        - 譜面を解析して改善提案（TODOコメント）を生成
-        - 指摘を一覧表示し、ユーザーが選んで挿入できる
-        """
-        content = self.text.get("1.0", tk.END)
-        if not content.strip():
-            messagebox.showinfo("AI添削", "譜面が空です。TJAを読み込んでください。")
-            return
-
-        lines = content.splitlines()
-
-        # ---------- ユーティリティ ----------
-        def is_chart_line(s):
-            s2 = s.strip()
-            # 数字が含まれる行（譜面行）をチャート行とみなす
-            return bool(re.search(r"[1-8]", s2)) and not s2.lstrip().startswith("#")
-
-        # measure 単位で解析する：#START〜#ENDの間をカンマで小節分割して行番号を推定
-        in_chart = False
-        current_measure_line = None
-        measures = []  # list of dict {line_num, text, don, katsu, total, unique_pattern_hash}
-        pending_buf = ""
-        pending_line = None
-
-        for i, raw in enumerate(lines):
-            line_num = i + 1
-            s = raw.rstrip("\n")
-            upper = s.strip().upper()
-
-            if upper.startswith("#START") or upper.startswith("#P1START") or upper.startswith("#P2START"):
-                in_chart = True
-                pending_buf = ""
-                pending_line = line_num + 1  # next lines belong to measures
-                continue
-            if upper.startswith("#END") or upper.startswith("#P1END") or upper.startswith("#P2END"):
-                # flush pending_buf
-                if pending_buf is not None:
-                    parts = pending_buf.split(",")
-                    for part in parts:
-                        if part == "":
-                            measures.append({"line_num": pending_line, "text": part, "don":0, "katsu":0, "total":0, "hash":""})
-                            pending_line = line_num
-                            continue
-                        cleaned = re.split(r"//|;", part)[0]
-                        don = len(re.findall(r"[13]", cleaned))
-                        katsu = len(re.findall(r"[24]", cleaned))
-                        measures.append({"line_num": pending_line, "text": cleaned, "don":don, "katsu":katsu, "total":don+katsu, "hash":hash(cleaned)})
-                        pending_line = line_num
-                in_chart = False
-                pending_buf = ""
-                pending_line = None
-                continue
-
-            if not in_chart:
-                continue
-
-            # コメント除去末尾スペース除去
-            clean = re.split(r"//|;", s)[0].replace(" ", "").replace("\t","")
-            pending_buf += clean
-            # flush complete measures if comma exists
-            while "," in pending_buf:
-                part, pending_buf = pending_buf.split(",", 1)
-                if part == "":
-                    measures.append({"line_num": line_num, "text": part, "don":0, "katsu":0, "total":0, "hash":""})
-                else:
-                    don = len(re.findall(r"[13]", part))
-                    katsu = len(re.findall(r"[24]", part))
-                    measures.append({"line_num": line_num, "text": part, "don":don, "katsu":katsu, "total":don+katsu, "hash":hash(part)})
-
-        # If still pending at EOF inside chart, flush remainder
-        if pending_buf:
-            parts = pending_buf.split(",")
-            for part in parts:
-                if part == "":
-                    measures.append({"line_num": len(lines), "text": part, "don":0, "katsu":0, "total":0, "hash":""})
-                else:
-                    don = len(re.findall(r"[13]", part))
-                    katsu = len(re.findall(r"[24]", part))
-                    measures.append({"line_num": len(lines), "text": part, "don":don, "katsu":katsu, "total":don+katsu, "hash":hash(part)})
-
-        if not measures:
-            messagebox.showinfo("AI添削", "譜面データが見つかりませんでした（#START/#END 間を確認してください）。")
-            return
-
-        # ---------- 統計算出 ----------
-        totals = [m["total"] for m in measures]
-        import statistics
-        mean = statistics.mean(totals) if totals else 0
-        stdev = statistics.pstdev(totals) if totals else 0
-
-        # detect repeated patterns (同じハッシュが連続している場合)
-        repeat_candidates = []
-        for idx in range(len(measures)-3):
-            # check 4-measure repetition
-            h = measures[idx]["hash"]
-            if h != 0 and h == measures[idx+1]["hash"] == measures[idx+2]["hash"] == measures[idx+3]["hash"]:
-                repeat_candidates.append((idx, idx+3))
-
-        # ---------- ルールベースの指摘生成 ----------
-        suggestions = []  # tuples (line_num, message)
-
-        # 1) 密度ピーク（平均 + 2*stdev を越える小節）
-        threshold = mean + 2 * stdev
-        for m in measures:
-            if m["total"] > 0 and threshold > 0 and m["total"] >= threshold:
-                suggestions.append((m["line_num"], f"密度ピーク（ノーツ:{m['total']}）が検出されます。難所か確認・緩和を検討してください。"))
-
-        # 2) 突然の落差（隣接と比べて2倍以上）
-        for i in range(1, len(measures)):
-            a = measures[i-1]["total"]
-            b = measures[i]["total"]
-            if a > 0 and b >= 2 * a and b >= 8:
-                suggestions.append((measures[i]["line_num"], f"直前小節から急にノーツが増えています（{a}→{b}）。導線/休憩を検討してください。"))
-            if b > 0 and a >= 2 * b and a >= 8:
-                suggestions.append((measures[i-1]["line_num"], f"直後小節から急にノーツが減っています（{a}→{b}）。違和感がないか確認してください。"))
-
-        # 3) DON/KATSU バランスが極端（片寄り）
-        for m in measures:
-            if m["total"] >= 8:
-                if m["don"] == 0 and m["katsu"] >= 8:
-                    suggestions.append((m["line_num"], f"この小節はカツ偏重（{m['katsu']}カツ）。ドンを一部混ぜてバランスを改善すると叩きやすくなります。"))
-                if m["katsu"] == 0 and m["don"] >= 8:
-                    suggestions.append((m["line_num"], f"この小節はドン偏重（{m['don']}ドン）。カツ挿入を検討してください。"))
-
-        # 4) 連続パターンの繰り返し（退屈/単調）
-        for start, end in repeat_candidates:
-            ln = measures[start]["line_num"]
-            suggestions.append((ln, f"{start+1}〜{end+1} 小節が同一パターンで繰り返されています（単調化の可能性）。変化案を入れてみてください。"))
-
-        # 5) 長い空白小節（ノーツ0）やカンマ抜け
-        for m in measures:
-            if m["text"] == "" and m["total"] == 0:
-                suggestions.append((m["line_num"], "空小節（カンマのみ/ノーツなし）です。意図的か確認してください。"))
-
-        # 6) 風船(7)の不一致チェック（簡易：7の数が奇数）
-        all_7 = len(re.findall(r"7", content))
-        if all_7 % 2 == 1:
-            # try to find approximate line where 7 appears unpaired
-            suggestions.append((1, "風船(7) の個数が奇数です。開始/終了が対応しているか確認してください。"))
-
-        # deduplicate suggestions by (line_num,message)
-        uniq = []
-        seen = set()
-        for item in suggestions:
-            key = (item[0], item[1])
-            if key not in seen:
-                uniq.append(item)
-                seen.add(key)
-        suggestions = uniq
-
-        # ---------- UI: 指摘一覧表示 ----------
-        win = Toplevel(self.root if hasattr(self, 'root') else self)
-        win.title("AI添削（提案一覧）")
-        win.geometry("720x420")
-
-        lbl = Label(win, text=f"自動生成された提案（{len(suggestions)}件）: 挿入する行を選んで「コメントを挿入」を押してください。")
-        lbl.pack(padx=8, pady=6)
-
-        frame = Frame(win)
-        frame.pack(fill="both", expand=True, padx=8, pady=(0,8))
-
-        sb = Scrollbar(frame)
-        sb.pack(side="right", fill="y")
-
-        listbox = Listbox(frame, yscrollcommand=sb.set, selectmode="extended", font=("Meiryo", 10))
-        for ln, msg in suggestions:
-            display = f"行{ln}: {msg}"
-            listbox.insert("end", display)
-        listbox.pack(fill="both", expand=True)
-        sb.config(command=listbox.yview)
-
-        def apply_comments():
-            sel = listbox.curselection()
-            if not sel:
-                if not messagebox.askyesno("全件挿入確認", "選択がありません。全件を挿入しますか？"):
-                    return
-                indices = range(0, listbox.size())
-            else:
-                indices = sel
-
-            # gather selected suggestions and sort by line_num descending to insert safely
-            to_insert = []
-            for i in indices:
-                text = listbox.get(i)
-                m = re.match(r"行(\d+):\s*(.+)", text)
-                if m:
-                    ln = int(m.group(1))
-                    msg = m.group(2)
-                    to_insert.append((ln, msg))
-            if not to_insert:
-                messagebox.showinfo("AI添削", "挿入する提案が見つかりません。")
-                return
-
-            to_insert.sort(key=lambda x: x[0], reverse=True)
-            for ln, msg in to_insert:
-                insert_pos = f"{ln}.0"
-                comment = f";AI: {msg}\n"
-                try:
-                    self.text.insert(insert_pos, comment)
-                except Exception as e:
-                    # fallback: append at end
-                    self.text.insert(tk.END, comment)
-
-            win.destroy()
-            messagebox.showinfo("AI添削", f"{len(to_insert)} 件のコメントを挿入しました。")
-
-        btn_frame = Frame(win)
-        btn_frame.pack(fill="x", padx=8, pady=8)
-        Button(btn_frame, text="コメントを挿入", command=apply_comments, width=18).pack(side="left", padx=6)
-        Button(btn_frame, text="全件を挿入", command=lambda: [listbox.select_set(0, listbox.size()-1), apply_comments()], width=12).pack(side="left", padx=6)
-        Button(btn_frame, text="閉じる", command=win.destroy, width=12).pack(side="right", padx=6)
         
     def reset_taikojiro_path(self):
         """メニューからいつでも太鼓さん次郎のパスを再設定可能"""
@@ -1316,124 +1168,13 @@ class TJAEditor:
             self.update_recent_menu()
             self.save_config()
 
-    def _create_widgets(self):
-        main_frame = tk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-    
-        self.linenumbers = tk.Canvas(main_frame, width=80, bg="white", highlightthickness=0)
-        self.linenumbers.pack(side=tk.LEFT, fill=tk.Y)
-    
-        center_frame = tk.Frame(main_frame)
-        center_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    
-        
-    
-        count_frame = tk.Frame(center_frame, width=230, bg="#f0f0f0", relief="sunken", bd=2)
-        count_frame.pack(side=tk.RIGHT, fill=tk.Y)  # padx=(5,0)を削除
-        count_frame.pack_propagate(False)  # 幅を固定
-    
-        # 超重要!これがないと他の機能でエラーになる
-        self.count_frame = count_frame
-    
-        # タイトルラベル
-        title_lbl = tk.Label(count_frame, text="■ 各難易度統計 ■", bg="#f0f0f0", 
-                             font=("メイリオ", 11, "bold"), fg="#333333")
-        title_lbl.pack(pady=(10, 5))
-    
-        # 統計表示テキスト(スクロール不要で超軽量)
-        self.count_text = tk.Text(count_frame, width=30, height=28,
-                                  font=("Courier New", 11), 
-                                  bg="#f0f0f0", fg="#000000",
-                                  relief="flat", state="disabled",
-                                  wrap="none")
-        self.count_text.pack(padx=10, pady=(0, 10), expand=True, fill=tk.BOTH)
-    
-        # ========== 左側のメインエディタ ==========
-        text_container = tk.Frame(center_frame)
-        text_container.pack(fill=tk.BOTH, expand=True)
-        
-        # 横スクロールバー用のフレーム
-        hscroll_frame = tk.Frame(center_frame)
-        hscroll_frame.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        hscroll = ttk.Scrollbar(hscroll_frame, orient=tk.HORIZONTAL)
-        hscroll.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # 縦スクロールバーの幅分の余白(右下の角を空ける)
-        corner_spacer = tk.Frame(hscroll_frame, width=15)
-        corner_spacer.pack(side=tk.RIGHT)
-        
-        vscroll = ttk.Scrollbar(text_container, orient=tk.VERTICAL)
-        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.text = tk.Text(text_container, yscrollcommand=vscroll.set, xscrollcommand=hscroll.set,
-                            undo=True, maxundo=self.MAX_UNDO, font=self.main_font, wrap=tk.NONE)
-        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-    
-        vscroll.config(command=self.text.yview)
-        self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
-        hscroll.config(command=self.text.xview)
-        vscroll.config(command=self.sync_scroll)  # この行を変更
-        self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
-        hscroll.config(command=self.text.xview)
-        
-        # ========== ステータスバー ==========
-        self.statusbar = tk.Label(self.root, text="準備完了", relief=tk.SUNKEN, anchor="w", font=("MS Gothic", 10))
-        self.statusbar.pack(side=tk.BOTTOM, fill=tk.X)
-    
-       # 検索ハイライト設定
-        self.text.tag_configure("search", background="yellow", foreground="black")
-        
-        # ========== 構文ハイライト設定 ==========
-        # ヘッダー行（青）
-        self.text.tag_configure("header", foreground="#0066cc", font=(self.main_font[0], self.main_font[1], "bold"))
-        # コメント（グレー）
-        self.text.tag_configure("comment", foreground="#6a9955", font=(self.main_font[0], self.main_font[1], "italic"))
-        # コマンド行（紫）
-        self.text.tag_configure("command", foreground="#c586c0", font=(self.main_font[0], self.main_font[1], "bold"))
-        # エラー行（赤下線）
-        self.text.tag_configure("error", foreground="#ff0000", underline=True)
-        # TODO（黄色背景）
-        self.text.tag_configure("todo", background="#fff9c4", foreground="#000000")
-        # 譜面行（通常のまま）
-        # 数値（オレンジ）
-        self.text.tag_configure("number", foreground="#b5cea8")
-        
-        # 起動後に1回だけ行番号更新
-        self.root.after(100, self.update_linenumbers)
-        
-    def _bind_events(self):
-        self.root.bind_all("<Control-o>", lambda e: self.open_file())
-        self.root.bind_all("<Control-s>", lambda e: self.save_file())
-        self.root.bind_all("<Control-t>", lambda e: self.open_todo_manager())
-        self.root.bind_all("<Control-Shift-s>", lambda e: self.save_as_file())
-        self.root.bind_all("<Control-f>", lambda e: self.open_search())
-        self.root.bind_all("<Control-Shift-E>", lambda e: self.check_errors())
-        self.root.bind_all("<Control-d>", lambda e: self.toggle_dark_mode())
-        self.root.bind_all("<Control-e>", lambda e: self.check_syntax_errors())
-        self.root.bind_all("<Control-Shift-P>", lambda e: self.open_command_palette())
-        self.root.bind("<F5>", lambda event: self.preview_play())
-        self.root.bind_all("<Control-e>", lambda e: self.create_distribution_zip())
-        # キー入力中もリアルタイムで行番号を更新
-        self.text.bind("<Key>", lambda e: self.root.after_idle(self.update_linenumbers))
-        self.text.bind("<KeyRelease>", lambda e: (self.root.after_idle(self.update_all), self.on_text_change()))
-        self.text.bind("<ButtonRelease>", lambda e: self.root.after_idle(self.update_linenumbers))
-        self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
-        self.text.bind("<MouseWheel>", lambda e: (
-            self.text.yview_scroll(-int(e.delta/120), "units"),
-            self.update_linenumbers()
-        ) or "break")
-        self.text.bind("<Shift-MouseWheel>", lambda e: self.text.xview_scroll(-int(e.delta/120), "units") or "break")
-        self.statusbar.config(text="準備完了 | F5: プレビュー再生")
-        self.text.bind("<<Modified>>", self._on_text_modified)
-
     def sync_scroll(self, *args):
         """縦スクロールバーとテキスト、行番号を同期"""
         self.text.yview(*args)
         self.update_linenumbers()
 
     def _on_text_modified(self, event=None):
-        self.text.edit_modified(False)  # フラグをリセットしないと連続で発火しない！
+        self.text.edit_modified(False)
         self.update_linenumbers()
 
     def toggle_dark_mode(self, force=None):
@@ -1446,86 +1187,221 @@ class TJAEditor:
             self.dark_mode = force
         else:
             self.dark_mode = not self.dark_mode
-    
+        
         if self.dark_mode:
+            # ダークモードカラー
             bg, fg, ins, sel = "#1e1e1e", "#d4d4d4", "#d4d4d4", "#264f78"
             linenum_bg = "#1e1e1e"
             status_bg, status_fg = "#2d2d30", "#d4d4d4"
             count_bg, count_fg = "#2b2b2b", "#ffffff"
             
-            # ダークモード用の構文ハイライト色
+            # 構文ハイライト色（ダークモード）
             header_fg = "#4fc3f7"
             comment_fg = "#6a9955"
             command_fg = "#c586c0"
             error_fg = "#f44336"
             todo_bg = "#5a5a3c"
             number_fg = "#b5cea8"
+            
+            # グリッド線色（ダークモード）
+            grid_quarter = "#3a3a3a"
+            grid_eighth = "#2d2d2d"
+            grid_sixteenth = "#252525"
         else:
+            # ライトモードカラー
             bg, fg, ins, sel = "white", "black", "black", "lightblue"
             linenum_bg = "white"
             status_bg, status_fg = "SystemButtonFace", "black"
             count_bg, count_fg = "#f0f0f0", "#000000"
             
-            # ライトモード用の構文ハイライト色
+            # 構文ハイライト色（ライトモード）
             header_fg = "#0066cc"
             comment_fg = "#6a9955"
             command_fg = "#c586c0"
             error_fg = "#ff0000"
             todo_bg = "#fff9c4"
             number_fg = "#098658"
-    
-        # メインエディタ
+            
+            # グリッド線色（ライトモード）
+            grid_quarter = "#e0e0e0"
+            grid_eighth = "#eeeeee"
+            grid_sixteenth = "#f5f5f5"
+        
+        # ====== 1. メインエディタ ======
         self.text.config(bg=bg, fg=fg, insertbackground=ins, selectbackground=sel)
+        
+        # ====== 2. 行番号エリア ======
         self.linenumbers.config(bg=linenum_bg)
+        
+        # ====== 3. ステータスバー ======
         self.statusbar.config(bg=status_bg, fg=status_fg)
-    
-        # 統計欄
+        
+        # ====== 4. 統計欄 ======
         self.count_frame.config(bg=count_bg)
         self.count_text.config(bg=count_bg, fg=count_fg)
+        # 統計欄内のラベルも更新
         for widget in self.count_frame.winfo_children():
-            if isinstance(widget, tk.Label):
+            if isinstance(widget, (tk.Label, tk.Frame)):
                 widget.config(bg=count_bg, fg=count_fg)
-    
-        # ttkスクロールバー
+            elif isinstance(widget, tk.Text):
+                widget.config(bg=count_bg, fg=count_fg)
+        
+        # ====== 5. スクロールバースタイル ======
         style = ttk.Style()
         if self.dark_mode:
             style.theme_use('clam')
-            style.configure("Vertical.TScrollbar", background="#3c3c3c", troughcolor="#1e1e1e", arrowcolor="#d4d4d4")
-            style.configure("Horizontal.TScrollbar", background="#3c3c3c", troughcolor="#1e1e1e", arrowcolor="#d4d4d4")
+            style.configure("Vertical.TScrollbar", 
+                           background="#3c3c3c", 
+                           troughcolor="#1e1e1e", 
+                           arrowcolor="#d4d4d4",
+                           bordercolor="#1e1e1e")
+            style.configure("Horizontal.TScrollbar", 
+                           background="#3c3c3c", 
+                           troughcolor="#1e1e1e", 
+                           arrowcolor="#d4d4d4",
+                           bordercolor="#1e1e1e")
         else:
             style.theme_use('default')
+            style.configure("Vertical.TScrollbar", 
+                           background="#c0c0c0", 
+                           troughcolor="#f0f0f0")
+            style.configure("Horizontal.TScrollbar", 
+                           background="#c0c0c0", 
+                           troughcolor="#f0f0f0")
         
-        # 構文ハイライトの色を更新
+        # ====== 6. 構文ハイライト色の更新 ======
         self.text.tag_configure("header", foreground=header_fg)
         self.text.tag_configure("comment", foreground=comment_fg)
         self.text.tag_configure("command", foreground=command_fg)
         self.text.tag_configure("error", foreground=error_fg)
         self.text.tag_configure("todo", background=todo_bg)
         self.text.tag_configure("number", foreground=number_fg)
-    
-        # 行番号とステータス更新
+        
+        # ====== 7. グリッド線のスタイル更新 ======
+        # グリッド線タグが存在する場合のみ設定
+        grid_tags = ["grid_line_quarter", "grid_line_eighth", "grid_line_sixteenth"]
+        for tag in grid_tags:
+            try:
+                # タグが使用されているかチェック
+                ranges = self.text.tag_ranges(tag)
+                if ranges:
+                    # タグが存在するので色を更新
+                    if tag == "grid_line_quarter":
+                        self.text.tag_configure(tag, background=grid_quarter)
+                    elif tag == "grid_line_eighth":
+                        self.text.tag_configure(tag, background=grid_eighth)
+                    elif tag == "grid_line_sixteenth":
+                        self.text.tag_configure(tag, background=grid_sixteenth)
+            except:
+                pass
+        
+        # もしグリッド線が表示されているなら、スタイルを適用
+        if hasattr(self, 'show_grid') and self.show_grid.get():
+            self.text.tag_configure("grid_line_quarter", background=grid_quarter)
+            self.text.tag_configure("grid_line_eighth", background=grid_eighth)
+            self.text.tag_configure("grid_line_sixteenth", background=grid_sixteenth)
+        
+        # ====== 8. 行番号とステータスバーの更新 ======
         self.update_linenumbers()
         self.update_statusbar()
-    
-        # 設定保存(forceの時も含めて毎回保存)
+        
+        # ====== 9. ポップアップメニューの色 ======
+        if hasattr(self, 'popup'):
+            if self.dark_mode:
+                self.popup.config(bg="#2d2d30", fg="#d4d4d4", 
+                                activebackground="#3e3e42", 
+                                activeforeground="#ffffff")
+            else:
+                self.popup.config(bg="SystemMenu", fg="SystemMenuText",
+                                activebackground="SystemHighlight",
+                                activeforeground="SystemHighlightText")
+        
+        # ====== 10. 設定保存 ======
         self.save_config()
         
-        # メニュー表示を更新
+        # ====== 11. メニュー表示を更新 ======
         if hasattr(self, 'viewmenu'):
             label = "ライトモードに切り替え" if self.dark_mode else "ダークモードに切り替え"
-            self.viewmenu.entryconfig(0, label=label)
-            
-    def _apply_dark_mode_recursive(self, widget, bg, fg):
+            try:
+                self.viewmenu.entryconfig(0, label=label)
+            except:
+                pass
+        
+        # ====== 12. 開いているサブウィンドウにも適用 ======
+        self._apply_dark_mode_to_windows()
+        
+        # 少し待ってから再度更新（確実に適用されるように）
+        self.root.after(100, self._finalize_dark_mode)
+    
+    def _apply_dark_mode_to_windows(self):
+        """開いているサブウィンドウにもダークモードを適用"""
+        if self.dark_mode:
+            bg, fg = "#2d2d30", "#d4d4d4"
+        else:
+            bg, fg = "SystemButtonFace", "black"
+        
+        # 既存のウィンドウに適用
+        windows_to_check = [
+            'dan_window', 'search_window', 'todo_window',
+            'offset_window', 'bpm_window', 'compare_window',
+            'palette_window'
+        ]
+        
+        for window_name in windows_to_check:
+            if hasattr(self, window_name):
+                window = getattr(self, window_name)
+                if window and window.winfo_exists():
+                    try:
+                        self._apply_dark_mode_to_widget(window, bg, fg)
+                    except:
+                        pass
+    
+    def _apply_dark_mode_to_widget(self, widget, bg, fg):
+        """ウィジェットとその子ウィジェットにダークモードを適用"""
         try:
-            if isinstance(widget, (tk.Entry, tk.Listbox, tk.Text)):
-                widget.config(bg=bg, fg=fg, insertbackground=fg)
-            elif isinstance(widget, tk.Label):
+            # ウィジェットタイプに応じて設定
+            if isinstance(widget, (tk.Toplevel, tk.Frame, tk.LabelFrame)):
+                widget.config(bg=bg)
+                if isinstance(widget, tk.LabelFrame):
+                    # LabelFrameのタイトル色も変更
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Label):
+                            child.config(bg=bg, fg=fg)
+            elif isinstance(widget, (tk.Label, tk.Button)):
                 widget.config(bg=bg, fg=fg)
+            elif isinstance(widget, (tk.Entry, tk.Text, tk.Listbox)):
+                widget.config(bg=bg if bg != "SystemButtonFace" else "white", 
+                             fg=fg, 
+                             insertbackground=fg)
+            elif isinstance(widget, ttk.Combobox):
+                # ttk.Comboboxのスタイル設定
+                style = ttk.Style()
+                if self.dark_mode:
+                    style.configure("TCombobox", 
+                                   fieldbackground=bg,
+                                   background=bg,
+                                   foreground=fg)
         except:
             pass
-        for child in widget.winfo_children():
-            self._apply_dark_mode_recursive(child, bg, fg)
-
+        
+        # 子ウィジェットにも再帰的に適用
+        try:
+            for child in widget.winfo_children():
+                self._apply_dark_mode_to_widget(child, bg, fg)
+        except:
+            pass
+    
+    def _finalize_dark_mode(self):
+        """ダークモード適用の最終処理"""
+        # 行番号を再度更新（確実に色が反映されるように）
+        self.update_linenumbers()
+        
+        # テキストエリアの表示を更新
+        self.text.update_idletasks()
+        
+        # ダークモード切り替え後のフォーカス設定
+        self.text.focus_set()
+        
     def update_all(self):
         self.update_linenumbers()
         self.update_status()
@@ -1534,11 +1410,189 @@ class TJAEditor:
         self.root.title(f"TJA Editor - {filename}")
 
     def update_statusbar(self):
-        line, col = self.text.index(tk.INSERT).split('.')
-        total_notes = len(re.findall(r'[12345678]', self.text.get("1.0", tk.END)))
-        filename = os.path.basename(self.current_file) if self.current_file else "新規ファイル"
-        mode = "ダーク" if self.dark_mode else "ライト"
-        self.statusbar.config(text=f"{filename} │ 行:{line} 列:{int(col)+1} │ 総ノート:{total_notes} │ {mode}モード")
+        """ステータスバーにブレッドクラム情報と基本情報を表示"""
+        try:
+            # 基本情報の取得（修正前のロジック）
+            line, col = self.text.index(tk.INSERT).split('.')
+            total_notes = len(re.findall(r'[12345678]', self.text.get("1.0", tk.END)))
+            filename = os.path.basename(self.current_file) if self.current_file else "新規ファイル"
+            mode = "ダーク" if self.dark_mode else "ライト"
+            
+            cursor_pos = self.text.index("insert")
+            line_num = int(cursor_pos.split('.')[0])
+            
+            if self.current_file:
+                filename = os.path.basename(self.current_file)
+            else:
+                filename = "新規ファイル"
+            
+            lines = self.text.get("1.0", tk.END).splitlines()
+            total_lines = len(lines)
+            
+            # ====== COURSE ブロック検出 ======
+            course_blocks = []
+            current_block_start = None
+            current_course_name = None
+            
+            for i, line_text in enumerate(lines):
+                u = line_text.strip().upper()
+                if u.startswith("COURSE:"):
+                    if current_block_start is not None:
+                        course_blocks.append((current_block_start, i, current_course_name))
+                    current_block_start = i
+                    current_course_name = u[7:].strip()
+            
+            if current_block_start is not None:
+                course_blocks.append((current_block_start, total_lines, current_course_name))
+            
+            # ====== 現在どの COURSE にいるか ======
+            current_course = None
+            current_block = None
+            for start, end, raw in course_blocks:
+                if start <= line_num - 1 < end:
+                    current_block = (start, end)
+                    course_map = {
+                        "0": "かんたん", "1": "ふつう", "2": "むずかしい",
+                        "3": "鬼", "4": "裏鬼",
+                        "EASY": "かんたん", "NORMAL": "ふつう", "HARD": "むずかしい",
+                        "ONI": "鬼", "EDIT": "裏鬼", "URA": "裏鬼"
+                    }
+                    current_course = course_map.get(raw, raw)
+                    break
+            
+            # ====== COURSE 外ならヘッダー ======
+            if current_block is None:
+                # 現在行が空行かチェック
+                current_line = lines[line_num - 1].strip() if line_num - 1 < len(lines) else ""
+                if not current_line:
+                    # 空行の場合は「空行」と表示
+                    breadcrumb = [filename, "ヘッダー部分", "空行", f"行 {line_num}"]
+                elif current_line.startswith("#"):
+                    # #で始まる命令文の場合は命令文を表示（#START/#END系以外）
+                    current_line_upper = current_line.upper()
+                    if current_line_upper in ["#START", "#END", "#P1START", "#P2START", "#P1END", "#P2END"]:
+                        # #START/#END系は特別扱い（譜面開始/終了）
+                        if current_line_upper in ["#START", "#P1START", "#P2START"]:
+                            breadcrumb = [filename, "ヘッダー部分", "譜面開始", f"行 {line_num}"]
+                        else:
+                            breadcrumb = [filename, "ヘッダー部分", "譜面終了", f"行 {line_num}"]
+                    else:
+                        # それ以外の命令文
+                        command_name = current_line.split()[0] if " " in current_line else current_line
+                        breadcrumb = [filename, "ヘッダー部分", command_name, f"行 {line_num}"]
+                else:
+                    breadcrumb = [filename, "ヘッダー部分", f"行 {line_num}"]
+            else:
+                start_line, end_line = current_block
+                
+                # ====== COURSE 内部解析 ======
+                in_chart = False
+                after_end = False
+                
+                measure_count = 0
+                current_measure_started = False
+                
+                for i in range(start_line + 1, min(line_num, end_line)):
+                    line_text = lines[i]
+                    u = line_text.strip().upper()
+                    
+                    if u in ["#START", "#P1START", "#P2START"]:
+                        in_chart = True
+                        after_end = False
+                        measure_count = 0
+                        current_measure_started = False
+                        continue
+                    
+                    if u in ["#END", "#P1END", "#P2END"]:
+                        in_chart = False
+                        after_end = True
+                        continue
+                    
+                    if in_chart:
+                        # コメント行や空行は無視
+                        if u.startswith("//") or u.startswith(";") or not u:
+                            continue
+                        # #で始まる命令文も無視（小節カウントに影響しない）
+                        if u.startswith("#"):
+                            continue
+                        if "," in line_text:
+                            measure_count += 1
+                            current_measure_started = False
+                        else:
+                            current_measure_started = True
+                
+                # ====== 現在行の状態 ======
+                current_line = lines[line_num - 1].strip() if line_num - 1 < len(lines) else ""
+                current_line_upper = current_line.upper()
+                is_start_line = current_line_upper in ["#START", "#P1START", "#P2START"]
+                is_end_line = current_line_upper in ["#END", "#P1END", "#P2END"]
+                
+                current_line_in_measure = False
+                if in_chart and line_num - 1 < end_line:
+                    if current_line and not current_line.startswith("#") and not current_line.startswith("//") and not current_line.startswith(";"):
+                        current_line_in_measure = True
+                        if "," not in current_line:
+                            measure_count += 1
+                
+                # 現在行が空行かチェック
+                if not current_line:
+                    # 空行の場合
+                    breadcrumb = [filename, f"[{current_course}]", "空行", f"行 {line_num}"]
+                elif current_line.startswith("#"):
+                    # #で始まる行の場合
+                    if current_line_upper in ["#START", "#END", "#P1START", "#P2START", "#P1END", "#P2END"]:
+                        # #START/#END系は特別扱い
+                        if is_start_line:
+                            breadcrumb = [filename, f"[{current_course}]", "譜面開始", f"行 {line_num}"]
+                        elif is_end_line:
+                            breadcrumb = [filename, f"[{current_course}]", "譜面終了", f"行 {line_num}"]
+                    else:
+                        # それ以外の命令文
+                        command_name = current_line.split()[0] if " " in current_line else current_line
+                        breadcrumb = [filename, f"[{current_course}]", command_name, f"行 {line_num}"]
+                else:
+                    # 通常行の場合
+                    breadcrumb = [filename, f"[{current_course}]"]
+                    
+                    if is_start_line:
+                        breadcrumb.append("譜面開始")
+                    elif in_chart:
+                        breadcrumb.append("譜面編集中")
+                        if measure_count > 0:
+                            breadcrumb.append(f"小節 {measure_count}")
+                        else:
+                            if current_measure_started or current_line_in_measure:
+                                breadcrumb.append("小節 1")
+                    elif is_end_line or after_end:
+                        breadcrumb.append("譜面終了")
+                    else:
+                        breadcrumb.append("ヘッダー部分")
+                    
+                    breadcrumb.append(f"行 {line_num}")
+            
+            # ブレッドクラム部分を結合
+            breadcrumb_text = " > ".join(breadcrumb)
+            
+            # 基本情報を追加（修正前のupdate_statusbarの形式）
+            status_text = f"{breadcrumb_text} │ 行:{line} 列:{int(col)+1} │ 総ノート:{total_notes} │ {mode}モード"
+            
+            self.statusbar.config(text=status_text)
+            
+        except Exception as e:
+            print(f"ステータスバー更新エラー: {e}")  # デバッグ用
+            # エラー時は簡易表示
+            try:
+                line, col = self.text.index(tk.INSERT).split('.')
+                total_notes = len(re.findall(r'[12345678]', self.text.get("1.0", tk.END)))
+                filename = os.path.basename(self.current_file) if self.current_file else "新規ファイル"
+                mode = "ダーク" if self.dark_mode else "ライト"
+                self.statusbar.config(
+                    text=f"{filename} │ 行:{line} 列:{int(col)+1} │ 総ノート:{total_notes} │ {mode}モード"
+                )
+            except:
+                self.statusbar.config(text="準備完了")
+        
+        # 定期的に更新
         self.root.after(200, self.update_statusbar)
     
     def get_taikojiro_path(self):
@@ -1551,6 +1605,84 @@ class TJAEditor:
                 path = config.get("taikojiro_path")
                 return path if path and os.path.isfile(path) else None
         except Exception:
+            return None
+
+    def on_linenumber_click(self, event):
+        """行番号をクリックしたときの処理"""
+        # テキストエリアにフォーカスを当てる
+        self.text.focus_set()
+        
+        try:
+            # テキストウィジェットの該当位置のインデックスを取得
+            text_index = self.text.index(f"@0,{event.y}")
+            line_num = int(text_index.split('.')[0])
+            
+            # その行を選択
+            self.text.tag_remove("sel", "1.0", "end")
+            self.text.tag_add("sel", f"{line_num}.0", f"{line_num}.end")
+            self.text.mark_set("insert", f"{line_num}.0")
+            self.text.see(f"{line_num}.0")
+            
+            # ドラッグ開始位置を記録
+            self.drag_start_line = line_num
+        except:
+            pass
+    
+    def on_linenumber_drag(self, event):
+        if not hasattr(self, 'drag_start_line'):
+            return
+    
+        self.text.focus_set()
+    
+        try:
+            # --- 自動スクロール ---
+            margin = 20
+            if event.y < margin:
+                self.text.yview_scroll(-1, "units")
+            elif event.y > self.linenumbers.winfo_height() - margin:
+                self.text.yview_scroll(1, "units")
+    
+            # --- 行位置取得 ---
+            text_index = self.text.index(f"@0,{event.y}")
+            line_num = int(text_index.split('.')[0])
+    
+            start = min(self.drag_start_line, line_num)
+            end = max(self.drag_start_line, line_num)
+    
+            self.text.tag_remove("sel", "1.0", "end")
+            self.text.tag_add("sel", f"{start}.0", f"{end}.end")
+            self.text.mark_set("insert", f"{line_num}.0")
+    
+            # スクロール位置へ移動
+            self.text.see(f"{line_num}.0")
+    
+            # ★ 行番号を更新（重要）
+            self.update_linenumbers()
+    
+        except:
+            pass
+
+    def get_line_from_y(self, y):
+        """Y座標から行番号を取得"""
+        try:
+            # スクロール位置を考慮
+            visible_start = self.text.index("@0,0")
+            start_line = int(visible_start.split('.')[0])
+            
+            # テキストエリアの各行の位置を確認
+            for line_num in range(start_line, start_line + 100):  # 表示範囲内のみチェック
+                bbox = self.text.bbox(f"{line_num}.0")
+                if bbox is None:
+                    break
+                
+                x, bbox_y, width, height = bbox
+                
+                # クリック位置がこの行の範囲内か判定
+                if bbox_y <= y <= bbox_y + height:
+                    return line_num
+            
+            return None
+        except:
             return None
 
     def set_taikojiro_path(self, path):
@@ -1905,7 +2037,7 @@ class TJAEditor:
         self.root.title(base)
         
     def check_errors(self):
-        """譜面の一般的なエラーを自動検出"""
+        """譜面の一般的なエラーを自動検出（完全修正版）"""
         content = self.text.get("1.0", tk.END)
         if not content.strip():
             messagebox.showinfo("エラーチェック", "譜面が空です。")
@@ -1920,12 +2052,24 @@ class TJAEditor:
         in_chart = False
         has_course = False
         has_level = False
+        has_bpm = False
+        has_wave = False
         
-        # コースごとの風船管理
-        current_course = "未定義"
-        course_balloons = {}  # {course: balloon_count}
+        # コースごとの管理
+        current_course = None
+        course_balloons = {}  # {course: balloon_start_count}
+        course_balloon_ends = {}  # {course: balloon_end_count}
         course_balloon_defs = {}  # {course: balloon_defined}
-        current_balloon_count = 0
+        course_has_measure = {}  # {course: has_measure_definition}
+        course_bpm_values = {}  # {course: [bpm_values]}
+        course_scroll_values = {}  # {course: [scroll_values]}
+        
+        # 状態管理
+        balloon_stack = []  # 風船の開始位置（行番号）を記録
+        in_branch = False
+        branch_start_line = 0
+        current_bpm = None
+        current_scroll = 1.0
         
         for i, line in enumerate(lines, 1):
             stripped = line.strip()
@@ -1937,16 +2081,17 @@ class TJAEditor:
                     errors.append((i, "警告", "#START が閉じられていません（二重開始）"))
                 start_count += 1
                 in_chart = True
-                current_balloon_count = 0  # コースごとにリセット
+                balloon_stack = []  # 新しい譜面開始で風船スタックをクリア
             elif upper in ["#END", "#P1END", "#P2END"]:
                 if not in_chart:
                     errors.append((i, "エラー", "#END に対応する #START がありません"))
                 end_count += 1
                 in_chart = False
-                # コース終了時に風船数を記録
-                if current_course not in course_balloons:
-                    course_balloons[current_course] = 0
-                course_balloons[current_course] += current_balloon_count
+                # 終了時点で未完了の風船があるかチェック
+                if balloon_stack:
+                    for line_num in balloon_stack:
+                        errors.append((line_num, "エラー", "風船が開始されましたが終了していません"))
+                balloon_stack = []
             
             # 2. COURSE 切り替え
             if upper.startswith("COURSE:"):
@@ -1955,52 +2100,244 @@ class TJAEditor:
                 # 数字を名前に変換
                 course_map = {"0": "EASY", "1": "NORMAL", "2": "HARD", "3": "ONI", "4": "EDIT"}
                 current_course = course_map.get(course_value, course_value)
+                # コースが切り替わったら状態を初期化
+                if current_course not in course_balloons:
+                    course_balloons[current_course] = 0
+                    course_balloon_ends[current_course] = 0
+                    course_balloon_defs[current_course] = 0
+                    course_has_measure[current_course] = False
+                    course_bpm_values[current_course] = []
+                    course_scroll_values[current_course] = []
             
             # 3. LEVEL の存在チェック
             if upper.startswith("LEVEL:"):
                 has_level = True
+                try:
+                    level = int(stripped[6:].strip())
+                    if not (1 <= level <= 10):
+                        errors.append((i, "警告", f"LEVELの値({level})は1〜10の範囲内であるべきです"))
+                except:
+                    errors.append((i, "エラー", "LEVELの値が無効です（数値を指定してください）"))
             
-            # 4. 全角数字チェック（譜面行）
+            # 4. BPM 定義チェック
+            if upper.startswith("BPM:"):
+                has_bpm = True
+                try:
+                    bpm_value = float(stripped[4:].strip())
+                    current_bpm = bpm_value
+                    if current_course:
+                        course_bpm_values[current_course].append(bpm_value)
+                    if bpm_value <= 0:
+                        errors.append((i, "エラー", f"BPM値({bpm_value})は正の数である必要があります"))
+                    elif bpm_value < 30 or bpm_value > 300:
+                        errors.append((i, "警告", f"BPM値({bpm_value})が極端です（通常は30〜300の範囲）"))
+                except:
+                    errors.append((i, "エラー", "BPMの値が無効です（数値を指定してください）"))
+            
+            # 5. WAVE 定義チェック
+            if upper.startswith("WAVE:"):
+                has_wave = True
+                wave_file = stripped[5:].strip()
+                if not wave_file:
+                    errors.append((i, "エラー", "WAVEファイル名が指定されていません"))
+                elif not wave_file.lower().endswith(('.ogg', '.wav', '.mp3')):
+                    errors.append((i, "警告", f"WAVEファイル({wave_file})は通常.ogg/.wav/.mp3形式です"))
+            
+            # 6. #MEASURE 定義チェック
+            if upper.startswith("#MEASURE"):
+                try:
+                    measure_str = stripped[8:].strip()
+                    if "/" in measure_str:
+                        numerator, denominator = measure_str.split("/")
+                        num = int(numerator.strip())
+                        den = int(denominator.strip())
+                        if num <= 0 or den <= 0:
+                            errors.append((i, "エラー", f"#MEASUREの値({measure_str})は正の数である必要があります"))
+                        if current_course:
+                            course_has_measure[current_course] = True
+                    else:
+                        errors.append((i, "エラー", f"#MEASUREの書式が不正です: {measure_str} (例: 4/4)"))
+                except:
+                    errors.append((i, "エラー", f"#MEASUREの値が無効です: {stripped[8:]}"))
+            
+            # 7. #BPMCHANGE チェック
+            if upper.startswith("#BPMCHANGE"):
+                try:
+                    bpm_change = float(stripped[10:].strip())
+                    if bpm_change <= 0:
+                        errors.append((i, "エラー", f"#BPMCHANGE値({bpm_change})は正の数である必要があります"))
+                    elif bpm_change < 30 or bpm_change > 300:
+                        errors.append((i, "警告", f"#BPMCHANGE値({bpm_change})が極端です"))
+                    if current_course:
+                        course_bpm_values[current_course].append(bpm_change)
+                except:
+                    errors.append((i, "エラー", "#BPMCHANGEの値が無効です（数値を指定してください）"))
+            
+            # 8. #SCROLL チェック
+            if upper.startswith("#SCROLL"):
+                try:
+                    scroll_value = float(stripped[7:].strip())
+                    if scroll_value <= 0:
+                        errors.append((i, "エラー", f"#SCROLL値({scroll_value})は正の数である必要があります"))
+                    elif scroll_value < 0.5 or scroll_value > 3.0:
+                        errors.append((i, "警告", f"#SCROLL値({scroll_value})が極端です（通常は0.5〜3.0の範囲）"))
+                    if current_course:
+                        course_scroll_values[current_course].append(scroll_value)
+                except:
+                    errors.append((i, "エラー", "#SCROLLの値が無効です（数値を指定してください）"))
+            
+            # 9. #BRANCHSTART チェック
+            if upper.startswith("#BRANCHSTART"):
+                if in_branch:
+                    errors.append((i, "エラー", "#BRANCHSTART が閉じられていません（二重開始）"))
+                in_branch = True
+                branch_start_line = i
+                try:
+                    params = stripped[12:].strip()
+                    if "," in params:
+                        acc, roll = params.split(",")
+                        acc_val = int(acc.strip())
+                        roll_val = int(roll.strip())
+                        if not (0 <= acc_val <= 100):
+                            errors.append((i, "警告", f"分岐精度条件({acc_val}%)は0〜100の範囲であるべきです"))
+                        if roll_val < 0:
+                            errors.append((i, "警告", f"分岐ロール条件({roll_val})は0以上の値であるべきです"))
+                    else:
+                        errors.append((i, "エラー", "#BRANCHSTARTの書式が不正です（例: #BRANCHSTART 90,10）"))
+                except:
+                    errors.append((i, "エラー", "#BRANCHSTARTの値が無効です"))
+            
+            # 10. 分岐譜面終了チェック（簡易）
+            if upper == "#N" or upper == "#E" or upper == "#M":
+                in_branch = False
+            
+            # 11. 全角数字チェック（譜面行）
             if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
                 if any(c in "０１２３４５６７８９" for c in stripped):
                     errors.append((i, "エラー", "全角数字が含まれています（半角に修正してください）"))
             
-            # 5. 風船カウント（風船は7のみ、譜面行のみ）
+            # 12. 風船(7)のペアリングチェック
             if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
-                current_balloon_count += stripped.count("7")
+                # 風船の開始と終了を追跡
+                for j, char in enumerate(stripped):
+                    if char == '7':
+                        if not balloon_stack:
+                            # 風船開始
+                            balloon_stack.append(i)
+                            if current_course:
+                                course_balloons[current_course] = course_balloons.get(current_course, 0) + 1
+                        else:
+                            # 風船終了
+                            balloon_stack.pop()
+                            if current_course:
+                                course_balloon_ends[current_course] = course_balloon_ends.get(current_course, 0) + 1
             
-            # 6. BALLOON定義チェック（コースごと）
+            # 13. BALLOON定義チェック（複数行対応）
             if upper.startswith("BALLOON:"):
-                balloon_values = stripped[8:].strip()
-                balloon_defined = len([v for v in balloon_values.split(",") if v.strip().isdigit()])
-                if current_course not in course_balloon_defs:
-                    course_balloon_defs[current_course] = 0
-                course_balloon_defs[current_course] += balloon_defined
+                balloon_line = stripped[8:].strip()
+                j = i
+                # 複数行にまたがる定義を収集
+                while j < len(lines) and j == i or (lines[j].strip() and 
+                                                   not lines[j].strip().upper().startswith(("COURSE:", "LEVEL:", "#START", "#END", 
+                                                                                           "TITLE:", "BPM:", "WAVE:", "OFFSET:"))):
+                    if j > i and lines[j-1].strip().endswith(','):
+                        balloon_line += lines[j].strip()
+                    elif j > i:
+                        break
+                    j += 1
+                
+                # 数値部分を抽出
+                numbers = [v.strip() for v in balloon_line.split(",") if v.strip().isdigit()]
+                balloon_defined = len(numbers)
+                
+                # 数値の妥当性チェック
+                for num_str in numbers:
+                    num = int(num_str)
+                    if num <= 0:
+                        errors.append((i, "警告", f"BALLOON値({num})は正の数であるべきです"))
+                
+                if current_course:
+                    course_balloon_defs[current_course] = course_balloon_defs.get(current_course, 0) + balloon_defined
+                else:
+                    errors.append((i, "警告", "COURSE定義より前にBALLOONが定義されています"))
         
-        # 7. #START/#END の数の一致チェック
+        # 14. #START/#END の数の一致チェック
         if start_count != end_count:
             errors.append((0, "エラー", f"#START({start_count}個) と #END({end_count}個) の数が一致しません"))
         
-        # 8. COURSE/LEVEL 未定義チェック
+        # 15. COURSE/LEVEL/BPM/WAVE 未定義チェック
         if not has_course:
             errors.append((0, "警告", "COURSE: が定義されていません"))
         if not has_level:
             errors.append((0, "警告", "LEVEL: が定義されていません"))
+        if not has_bpm:
+            errors.append((0, "警告", "BPM: が定義されていません"))
+        if not has_wave:
+            errors.append((0, "警告", "WAVE: が定義されていません"))
         
-        # 9. コースごとの風船の個数チェック
+        # 16. コースごとの風船チェック
         for course in set(list(course_balloons.keys()) + list(course_balloon_defs.keys())):
-            balloon_count = course_balloons.get(course, 0)
+            balloon_start = course_balloons.get(course, 0)
+            balloon_end = course_balloon_ends.get(course, 0)
             balloon_defined = course_balloon_defs.get(course, 0)
             
-            if balloon_count > 0 and balloon_defined == 0:
-                errors.append((0, "警告", f"[{course}] 風船(7)が{balloon_count}個ありますが、BALLOON: が定義されていません"))
-            elif balloon_count != balloon_defined and balloon_defined > 0:
-                errors.append((0, "警告", f"[{course}] 風船の個数({balloon_count}個) と BALLOON: の定義数({balloon_defined}個) が一致しません"))
+            # 開始と終了の数が一致するか
+            if balloon_start != balloon_end:
+                errors.append((0, "エラー", f"[{course}] 風船の開始({balloon_start}個)と終了({balloon_end}個)の数が一致しません"))
+            
+            # BALLOON定義との一致チェック
+            if balloon_start > 0 and balloon_defined == 0:
+                errors.append((0, "警告", f"[{course}] 風船が{balloon_start}個ありますが、BALLOON: が定義されていません"))
+            elif balloon_start != balloon_defined and balloon_defined > 0:
+                errors.append((0, "警告", f"[{course}] 風船の個数({balloon_start}個) と BALLOON: の定義数({balloon_defined}個) が一致しません"))
+            
+            # #MEASURE定義チェック
+            if not course_has_measure.get(course, False):
+                errors.append((0, "警告", f"[{course}] #MEASURE が定義されていません（例: #MEASURE 4/4）"))
+            
+            # BPM値のチェック
+            bpm_values = course_bpm_values.get(course, [])
+            if len(bpm_values) > 0:
+                # BPM変化の急激さをチェック
+                for j in range(1, len(bpm_values)):
+                    ratio = max(bpm_values[j], bpm_values[j-1]) / min(bpm_values[j], bpm_values[j-1])
+                    if ratio > 2.0:  # BPMが2倍以上変化
+                        errors.append((0, "警告", f"[{course}] BPMの変化が急激です ({bpm_values[j-1]} → {bpm_values[j]})"))
         
-        # 10. カンマの連続チェック
+        # 17. カンマの連続チェック
         for i, line in enumerate(lines, 1):
             if ",," in line:
                 errors.append((i, "警告", "カンマが連続しています（空の小節）"))
+            # 行末の不要なカンマチェック
+            if line.rstrip().endswith(',') and i < len(lines):
+                next_line = lines[i].strip()
+                if next_line and not next_line.startswith(('#', '//', ';')):
+                    errors.append((i, "警告", "行末に余分なカンマがあります（次の行と結合される可能性）"))
+        
+        # 18. 不完全な風船があるかチェック
+        if balloon_stack:
+            for line_num in balloon_stack:
+                errors.append((line_num, "エラー", "風船が開始されましたが終了していません"))
+        
+        # 19. 分岐が閉じられていないかチェック
+        if in_branch:
+            errors.append((branch_start_line, "エラー", "#BRANCHSTART が閉じられていません"))
+        
+        # 20. OFFSET値のチェック
+        offset_line = None
+        for i, line in enumerate(lines, 1):
+            if line.strip().upper().startswith("OFFSET:"):
+                offset_line = i
+                try:
+                    offset_val = float(line.strip()[7:].strip())
+                    if abs(offset_val) > 5.0:
+                        errors.append((i, "警告", f"OFFSET値({offset_val})が大きすぎます（通常は-2.0〜2.0の範囲）"))
+                except:
+                    errors.append((i, "エラー", "OFFSETの値が無効です（数値を指定してください）"))
+                break
+        
+        if offset_line is None:
+            errors.append((0, "警告", "OFFSET: が定義されていません"))
         
         # 結果表示
         if not errors:
@@ -2266,26 +2603,35 @@ class TJAEditor:
                 self.text.tag_add("command", line_start, line_end)
             
             # 3. ヘッダー行（TITLE:, BPM: など）
-            elif ":" in line and not any(c in "12345678" for c in stripped):
-                # ヘッダーキーワードリスト
-                headers = ["TITLE", "SUBTITLE", "BPM", "WAVE", "OFFSET", "DEMOSTART", 
-                          "GENRE", "SCOREMODE", "SCOREINIT", "SCOREDIFF", "COURSE", 
-                          "LEVEL", "BALLOON", "SONGVOL", "SEVOL", "MAKER"]
-                
-                # 行の最初の単語を取得
+            elif ":" in line:
+                headers = [
+                    "TITLE", "SUBTITLE", "BPM", "WAVE", "OFFSET", "DEMOSTART",
+                    "GENRE", "SCOREMODE", "SCOREINIT", "SCOREDIFF", "COURSE",
+                    "LEVEL", "BALLOON", "SONGVOL", "SEVOL", "MAKER"
+                ]
+            
                 first_word = stripped.split(":")[0].upper()
                 if first_word in headers:
-                    # ヘッダー名のみハイライト
+                    # ヘッダー名部分だけ色を付ける
                     colon_pos = line.index(":")
                     header_end = f"{i}.{colon_pos}"
                     self.text.tag_add("header", line_start, header_end)
-                    
-                    # 数値部分をハイライト
-                    value_part = line[colon_pos+1:].strip()
-                    if value_part and (value_part.replace(".", "").replace("-", "").isdigit()):
-                        value_start = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part)}"
-                        value_end = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part) + len(value_part)}"
-                        self.text.tag_add("number", value_start, value_end)
+            
+                    # 数値部分をハイライト（単体数値＋カンマ区切りの複数数値に対応）
+                value_part = line[colon_pos + 1:].strip()
+                
+                # 単一数値 → 120, -1.25 など
+                is_single_num = re.fullmatch(r"[0-9.\-]+", value_part)
+                
+                # カンマ区切り複数 → 5,10,15 など
+                is_multi_num = re.fullmatch(r"[0-9.\-]+(,[0-9.\-]+)+", value_part)
+                
+                if value_part and (is_single_num or is_multi_num):
+                    value_start = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part)}"
+                    value_end = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part) + len(value_part)}"
+                    self.text.tag_add("number", value_start, value_end)
+
+
             
             # 4. 行内コメントの処理（譜面行の後ろのコメント）
             if "//" in line or ";" in line:
@@ -2308,52 +2654,53 @@ class TJAEditor:
         self.root.after_idle(self.apply_syntax_highlighting)
             
     def open_file(self, path=None):
-                """ファイルを開く（recent_filesの重複防止・即時保存・メニュー更新を完全対応）"""
-                if path is None:
-                    path = filedialog.askopenfilename(
-                        title="TJAファイルを開く",
-                        filetypes=[("TJAファイル", "*.tja"), ("すべてのファイル", "*.*")],
-                        initialdir=self.last_folder
-                    )
-                    if not path:
-                        return
+        """ファイルを開く（recent_filesの重複防止・即時保存・メニュー更新を完全対応）"""
+        if path is None:
+            path = filedialog.askopenfilename(
+                title="TJAファイルを開く",
+                filetypes=[("TJAファイル", "*.tja"), ("すべてのファイル", "*.*")],
+                initialdir=self.last_folder
+            )
+            if not path:
+                return
+    
+        path = os.path.abspath(path)
+        self.last_folder = os.path.dirname(path)
+    
+        try:
+            # 文字エンコーディング自動判定
+            with open(path, "rb") as f:
+                raw = f.read()
+                encoding = chardet.detect(raw)["encoding"] or "shift_jis"
+                if encoding.lower().startswith("utf") and raw.startswith(b"\xef\xbb\xbf"):
+                    encoding = "utf-8-sig"
+    
+            content = raw.decode(encoding, errors="replace")
+            self.text.delete("1.0", tk.END)
+            self.text.insert("1.0", content)
+            self.text.edit_modified(False)
+    
+            self.current_file = path
+            self.update_title()
+            self.update_all()
+    
+            # === 最近使ったファイルの処理（重複なし・先頭移動・最大10個）===
+            if path in self.recent_files:
+                self.recent_files.remove(path)  # 既存があれば削除
+            self.recent_files.insert(0, path)   # 先頭に追加
+            if len(self.recent_files) > self.MAX_RECENT:
+                self.recent_files = self.recent_files[:self.MAX_RECENT]
+    
+            # メニュー即時更新 + 設定ファイルに即時保存
+            self.update_recent_menu()
+            self.save_config()
             
-                path = os.path.abspath(path)
-                self.last_folder = os.path.dirname(path)
-            
-                try:
-                    # 文字エンコーディング自動判定
-                    with open(path, "rb") as f:
-                        raw = f.read()
-                        encoding = chardet.detect(raw)["encoding"] or "shift_jis"
-                        if encoding.lower().startswith("utf") and raw.startswith(b"\xef\xbb\xbf"):
-                            encoding = "utf-8-sig"
-            
-                    content = raw.decode(encoding, errors="replace")
-                    self.text.delete("1.0", tk.END)
-                    self.text.insert("1.0", content)
-                    self.text.edit_modified(False)
-            
-                    self.current_file = path
-                    self.update_title()
-                    self.update_all()
-            
-                    # === 最近使ったファイルの処理（重複なし・先頭移動・最大10個）===
-                    if path in self.recent_files:
-                        self.recent_files.remove(path)  # 既存があれば削除
-                    self.recent_files.insert(0, path)   # 先頭に追加
-                    if len(self.recent_files) > self.MAX_RECENT:
-                        self.recent_files = self.recent_files[:self.MAX_RECENT]
-            
-                    # メニュー即時更新 + 設定ファイルに即時保存
-                    self.update_recent_menu()
-                    self.save_config()
-                    
-                    # 構文ハイライトを適用
-                    self.apply_syntax_highlighting()
-            
-                except Exception as e:
-                    messagebox.showerror("エラー", f"ファイルを開けませんでした:\n{e}")
+            # 構文ハイライトを適用
+            self.apply_syntax_highlighting()
+            # self.update_breadcrumb()  # ← 削除
+    
+        except Exception as e:
+            messagebox.showerror("エラー", f"ファイルを開けませんでした:\n{e}")
 
     def save_file(self):
         if self.current_file:
@@ -2365,7 +2712,7 @@ class TJAEditor:
                     backup_dir = os.path.join(os.path.dirname(self.current_file), ".backup")
                     os.makedirs(backup_dir, exist_ok=True)
                     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                    backup_name = f"{ts}_{os.path.basename(self.current_file)}"  # ← ここを変更
+                    backup_name = f"{ts}_{os.path.basename(self.current_file)}"
                     shutil.copy2(self.current_file, os.path.join(backup_dir, backup_name))
     
                 # ← 読み込んだエンコーディングで保存
@@ -2381,29 +2728,87 @@ class TJAEditor:
             self.save_as_file()
         
     def save_as_file(self):
-        file_path = filedialog.asksaveasfilename(initialdir=self.last_folder, defaultextension=".tja", filetypes=[("TJA files", "*.tja")])
+        """名前を付けて保存（TITLE:からファイル名を自動取得＆バックアップフォルダを常に確保）"""
+        # デフォルトファイル名をTITLE:から取得
+        default_filename = "新規譜面.tja"
+        
+        # 現在の内容からTITLE:を検索
+        content = self.text.get("1.0", tk.END)
+        title_match = re.search(r'^TITLE:\s*(.+)$', content, re.MULTILINE | re.IGNORECASE)
+        
+        if title_match:
+            title = title_match.group(1).strip()
+            if title:
+                # ファイル名として安全な文字に変換
+                safe_title = re.sub(r'[<>:"/\\|?*]', '_', title)
+                default_filename = f"{safe_title}.tja"
+        
+        # 保存ダイアログを表示（デフォルトファイル名を設定）
+        file_path = filedialog.asksaveasfilename(
+            initialdir=self.last_folder,
+            initialfile=default_filename,
+            defaultextension=".tja",
+            filetypes=[("TJAファイル", "*.tja"), ("すべてのファイル", "*.*")]
+        )
+        
         if file_path:
             self.last_folder = os.path.dirname(file_path)
             try:
                 content = self.text.get("1.0", tk.END)
-                # 自動バックアップ
+                
+                # ★ 常にバックアップフォルダを作成しておく（新規保存時も含む）
+                backup_dir = os.path.join(os.path.dirname(file_path), ".backup")
+                os.makedirs(backup_dir, exist_ok=True)
+                print(f"[DEBUG] バックアップフォルダを確保: {backup_dir}")
+                
+                # ★ タイムスタンプ付き自動バックアップ（既存ファイルがある場合のみ）
                 if os.path.exists(file_path):
-                    backup = file_path + "~"
-                    shutil.copy2(file_path, backup)
-                # ← 保存時のエンコーディングを設定
+                    print(f"[DEBUG] 既存ファイルを検出: {file_path}")
+                    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                    backup_name = f"{ts}_{os.path.basename(file_path)}"
+                    backup_path = os.path.join(backup_dir, backup_name)
+                    
+                    try:
+                        shutil.copy2(file_path, backup_path)
+                        print(f"[DEBUG] バックアップ作成成功: {backup_path}")
+                        
+                        # 従来の ~ バックアップも残す（オプション）
+                        backup = file_path + "~"
+                        shutil.copy2(file_path, backup)
+                        print(f"[DEBUG] 簡易バックアップも作成: {backup}")
+                    except Exception as backup_error:
+                        print(f"[DEBUG] バックアップ作成失敗: {backup_error}")
+                
+                # メインの保存処理
                 with open(file_path, 'w', encoding=self.current_encoding, newline='\n') as f:
                     f.write(content.rstrip() + "\n")
+                
                 self.current_file = file_path
+                self.text.edit_modified(False)
                 self.update_all()
-                messagebox.showinfo("保存", "保存しました")
+                
+                # 成功メッセージ
+                filename = os.path.basename(file_path)
+                is_new_file = not self.current_file or not os.path.exists(file_path)
+                
+                if is_new_file:
+                    message_text = f"新規保存しました！\nファイル名: {filename}"
+                else:
+                    message_text = f"名前を付けて保存しました！\nファイル名: {filename}"
+                    if os.path.exists(file_path):
+                        message_text += "\n（既存ファイルは自動バックアップされました）"
+                
+                messagebox.showinfo("保存完了", message_text)
+                
                 # 最近ファイル追加
                 if file_path in self.recent_files:
                     self.recent_files.remove(file_path)
                 self.recent_files.insert(0, file_path)
                 self.recent_files = self.recent_files[:self.MAX_RECENT]
                 self.update_recent_menu()
+                
             except Exception as e:
-                messagebox.showerror("エラー", f"保存失敗\n{e}")
+                messagebox.showerror("保存エラー", f"保存に失敗しました…\n{e}")
 
     def open_command_palette(self):
         """コマンドパレットを開く（VSCode風）"""
@@ -2930,9 +3335,17 @@ class TJAEditor:
         messagebox.showinfo("成功", f"{os.path.basename(path)}\nBPM: {bpm} を自動取得＆挿入しました")
 
     def open_dan_window(self):
-        if self.dan_window and self.dan_window.winfo_exists():
+        if hasattr(self, 'dan_window') and self.dan_window and self.dan_window.winfo_exists():
             self.dan_window.lift()
             return
+        
+        # === 必要な属性を関数内で定義 ===
+        self.exam_types = ["魂ゲージ", "良の数", "可の数", "不可の数", "スコア", "連打数", "叩けた数", "最大コンボ数"]
+        self.exam_codes = {"魂ゲージ":"g","良の数":"jp","可の数":"jg","不可の数":"jb","スコア":"s","連打数":"r","叩けた数":"h","最大コンボ数":"c"}
+        self.comparisons_jp = ["～以上", "～未満"]
+        self.comparisons = {"～以上":"m", "～未満":"l"}
+        # =============================
+        
         self.song_paths.clear()
         self.song_courses_temp.clear()
         self.song_course_values.clear()
@@ -2943,84 +3356,189 @@ class TJAEditor:
         self.dan_window = Toplevel(self.root)
         self.dan_window.protocol("WM_DELETE_WINDOW", self._close_dan_window)
         self.dan_window.title("段位道場設定")
-        self.dan_window.geometry("840x700")  # ★ 初期サイズを大きく変更
-        self.dan_window.resizable(True, True)
+        # 共通合格条件が収まる固定サイズに設定
+        self.dan_window.geometry("1400x700")
+        self.dan_window.resizable(False, False)  # サイズ固定
         
-        # ★ Canvas + Scrollbar 構造
-        canvas = tk.Canvas(self.dan_window)
-        v_scroll = Scrollbar(self.dan_window, orient="vertical", command=canvas.yview)
-        h_scroll = Scrollbar(self.dan_window, orient="horizontal", command=canvas.xview)
-        v_scroll.pack(side="right", fill="y")
-        h_scroll.pack(side="bottom", fill="x")
+        # スクロール対応のメインフレーム
+        main_frame = Frame(self.dan_window)
+        main_frame.pack(fill="both", expand=True, padx=5, pady=5)
         
-        scrollable_frame = Frame(canvas)
-        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-        canvas.pack(side="top", fill="both", expand=True)
+        # カラム分割（左：曲リスト、右：設定）
+        left_frame = Frame(main_frame, width=350, relief="ridge", bd=2)
+        left_frame.pack(side="left", fill="both", padx=(0, 5))
+        left_frame.pack_propagate(False)
         
-        def _on_mousewheel(event):
-            canvas.yview_scroll(-1*(event.delta//120), "units")
-        self.dan_window.bind_all("<MouseWheel>", _on_mousewheel)
+        right_frame = Frame(main_frame)
+        right_frame.pack(side="right", fill="both", expand=True)
         
-        # ★ コンテナの幅を固定せずに自然な幅に
-        container = Frame(scrollable_frame, padx=20, pady=20)
-        container.pack(fill=tk.BOTH, expand=True)
+        # === 左フレーム: 曲リストと操作 ===
+        # セクションタイトル
+        Label(left_frame, text="■ 曲リスト", 
+              font=("メイリオ", 12, "bold"), bg="#e0e0e0", fg="#333333",
+              anchor="w", padx=10, pady=8).pack(fill="x")
         
-        # タイトル入力
-        title_frame = Frame(container)
-        title_frame.pack(pady=10, fill=tk.X)
-        Label(title_frame, text="TITLE:", font=("MS Gothic", 12)).grid(row=0, column=0, sticky="e", padx=5)
-        self.dan_title_entry = Entry(title_frame, font=("MS Gothic", 12), width=50)  # ★ 幅を広げる
-        self.dan_title_entry.grid(row=0, column=1, sticky="ew", padx=5)
-        title_frame.grid_columnconfigure(1, weight=1)
+        # タイトル入力（コンパクトに）
+        title_frame = Frame(left_frame, padx=10, pady=5)
+        title_frame.pack(fill="x", pady=(0, 5))
+        Label(title_frame, text="TITLE:", font=("メイリオ", 10)).pack(side="left", padx=(0, 5))
+        self.dan_title_entry = Entry(title_frame, font=("メイリオ", 10))
+        self.dan_title_entry.pack(side="left", fill="x", expand=True)
         
-        # ジャンル選択
-        genre_frame = Frame(container)
-        genre_frame.pack(pady=10, fill=tk.X)
-        Label(genre_frame, text="段位ジャンル:", font=("MS Gothic", 12)).grid(row=0, column=0, sticky="e", padx=5)
+        # ジャンル選択（コンパクトに）
+        genre_frame = Frame(left_frame, padx=10, pady=5)
+        genre_frame.pack(fill="x", pady=(0, 10))
+        Label(genre_frame, text="ジャンル:", font=("メイリオ", 10)).pack(side="left", padx=(0, 5))
         if not hasattr(self, 'dan_genre_var'):
             self.dan_genre_var = tk.StringVar(value="金")
         genre_combo = ttk.Combobox(genre_frame, textvariable=self.dan_genre_var,
                                    values=["黄", "青", "赤", "銀", "金"],
-                                   state="readonly", width=10, font=("MS Gothic", 12))
-        genre_combo.grid(row=0, column=1, sticky="w", padx=5)
-        Label(genre_frame, text="(GENRE:段位-〇 として出力されます)", font=("MS Gothic", 10), fg="gray")\
-            .grid(row=0, column=2, padx=20, sticky="w")
+                                   state="readonly", width=8, font=("メイリオ", 10))
+        genre_combo.pack(side="left")
         
-        # 曲リスト
-        list_frame = Frame(container)
-        list_frame.pack(pady=10, fill=tk.BOTH, expand=True)
-        Label(list_frame, text="曲リスト:", font=("MS Gothic", 12)).grid(row=0, column=0, sticky="w")
-        self.song_listbox = Listbox(list_frame, font=("Courier", 11), height=8, selectmode=tk.SINGLE, width=80)  # ★ 幅を広げる
-        self.song_listbox.grid(row=1, column=0, sticky="nsew", padx=(0, 5))
-        list_scroll = Scrollbar(list_frame, orient="vertical", command=self.song_listbox.yview)
-        list_scroll.grid(row=1, column=1, sticky="ns")
-        self.song_listbox.config(yscrollcommand=list_scroll.set)
+        # 曲リスト（スクロール対応）
+        list_container = Frame(left_frame)
+        list_container.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         
-        # ★ 曲設定フレーム(後で動的にリサイズ)
-        self.song_settings_frame = LabelFrame(container, text="各曲の設定(難易度・ジャンル・スコア)", 
-                                              font=("MS Gothic", 12), padx=10, pady=10)
-        self.song_settings_frame.pack(pady=15, fill=tk.BOTH, expand=True)
+        list_scroll = Scrollbar(list_container)
+        list_scroll.pack(side="right", fill="y")
         
-        list_frame.grid_rowconfigure(1, weight=1)
-        list_frame.grid_columnconfigure(0, weight=1)
+        self.song_listbox = Listbox(list_container, 
+                                    yscrollcommand=list_scroll.set,
+                                    font=("MS Gothic", 10),
+                                    selectmode=tk.SINGLE,
+                                    height=12,
+                                    relief="sunken",
+                                    bd=2)
+        self.song_listbox.pack(fill="both", expand=True)
+        list_scroll.config(command=self.song_listbox.yview)
         
-        # ボタン群
-        btn_frame = Frame(container)
-        btn_frame.pack(pady=10)
-        self.add_button = Button(btn_frame, text="曲追加 (3/3)", command=self.add_song, font=("MS Gothic", 11))
-        self.add_button.grid(row=0, column=0, padx=10)
-        Button(btn_frame, text="削除", command=self.remove_song, font=("MS Gothic", 11)).grid(row=0, column=1, padx=10)
-        Button(btn_frame, text="↑", command=self.move_up, font=("MS Gothic", 11)).grid(row=0, column=2, padx=10)
-        Button(btn_frame, text="↓", command=self.move_down, font=("MS Gothic", 11)).grid(row=0, column=3, padx=10)
+        # 曲追加ボタン（ステータス表示付き）
+        add_remove_frame = Frame(left_frame)
+        add_remove_frame.pack(fill="x", padx=10, pady=(0, 5))
         
-        self.exam_types = ["魂ゲージ", "良の数", "可の数", "不可の数", "スコア", "連打数", "叩けた数", "最大コンボ数"]
-        self.exam_codes = {"魂ゲージ":"g","良の数":"jp","可の数":"jg","不可の数":"jb","スコア":"s","連打数":"r","叩けた数":"h","最大コンボ数":"c"}
-        self.comparisons_jp = ["～以上", "～未満"]
-        self.comparisons = {"～以上":"m", "～未満":"l"}
-        self.common_frame = LabelFrame(container, text="共通合格条件", font=("MS Gothic", 12), padx=10, pady=10, relief="groove", borderwidth=2)
-        self.common_frame.pack(pady=15, fill=tk.X)
+        self.add_button = Button(add_remove_frame, 
+                                 text="曲を追加 (3曲まで)",
+                                 command=self.add_song,
+                                 font=("メイリオ", 10),
+                                 bg="#4CAF50",
+                                 fg="white",
+                                 width=20)
+        self.add_button.pack(side="left", padx=(0, 5))
+        
+        Button(add_remove_frame, 
+               text="削除",
+               command=self.remove_song,
+               font=("メイリオ", 10),
+               width=8).pack(side="left", padx=2)
+        
+        # 移動ボタン
+        move_frame = Frame(left_frame)
+        move_frame.pack(fill="x", padx=10, pady=(0, 15))
+        
+        Button(move_frame, 
+               text="▲ 上に移動",
+               command=self.move_up,
+               font=("メイリオ", 9),
+               width=12).pack(side="left", padx=2)
+        Button(move_frame, 
+               text="▼ 下に移動",
+               command=self.move_down,
+               font=("メイリオ", 9),
+               width=12).pack(side="left", padx=2)
+        
+        # === 右フレーム: 詳細設定 ===
+        # タブ形式の設定エリア
+        notebook = ttk.Notebook(right_frame)
+        notebook.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # タブ1: 曲詳細設定
+        song_tab = Frame(notebook)
+        notebook.add(song_tab, text="各曲の詳細設定")
+        
+        # 曲設定フレーム（スクロール対応）
+        song_scroll = Scrollbar(song_tab)
+        song_scroll.pack(side="right", fill="y")
+        
+        song_canvas = tk.Canvas(song_tab, yscrollcommand=song_scroll.set)
+        song_canvas.pack(side="left", fill="both", expand=True)
+        song_scroll.config(command=song_canvas.yview)
+        
+        song_inner_frame = Frame(song_canvas)
+        song_canvas.create_window((0, 0), window=song_inner_frame, anchor="nw")
+        
+        self.song_settings_frame = Frame(song_inner_frame, padx=10, pady=10)
+        self.song_settings_frame.pack(fill="x")
+        
+        def update_song_scrollregion(event):
+            song_canvas.configure(scrollregion=song_canvas.bbox("all"))
+        
+        song_inner_frame.bind("<Configure>", update_song_scrollregion)
+        
+        # 初期表示メッセージ
+        Label(self.song_settings_frame, 
+              text="曲を追加すると、ここに各曲の詳細設定が表示されます。",
+              font=("メイリオ", 12),
+              fg="gray",
+              pady=20).pack()
+        
+        # タブ2: 合格条件設定
+        condition_tab = Frame(notebook)
+        notebook.add(condition_tab, text="合格条件")
+        
+        # 合格条件設定（スクロール対応）
+        cond_scroll = Scrollbar(condition_tab)
+        cond_scroll.pack(side="right", fill="y")
+        
+        cond_canvas = tk.Canvas(condition_tab, yscrollcommand=cond_scroll.set)
+        cond_canvas.pack(side="left", fill="both", expand=True)
+        cond_scroll.config(command=cond_canvas.yview)
+        
+        cond_inner_frame = Frame(cond_canvas, padx=15, pady=15)
+        cond_canvas.create_window((0, 0), window=cond_inner_frame, anchor="nw")
+        
+        # 共通合格条件セクション
+        common_frame = LabelFrame(cond_inner_frame, 
+                                  text="共通合格条件 (全ての曲に適用)",
+                                  font=("メイリオ", 11, "bold"),
+                                  padx=15,
+                                  pady=15,
+                                  bg="#f8f8f8",
+                                  relief="groove")
+        common_frame.pack(fill="x", pady=(0, 15))
+        
+        # グリッドレイアウトで条件を整列（横幅に収まるように調整）
+        self.common_type_combos = {}
+        self.common_comp_combos = {}
+        self.common_normal_entries = {}
+        self.common_gold_entries = {}
+        self.per_song_vars = {}
+        self.per_song_frames = {}
+        self.per_song_widgets = {}
+        self.per_song_order = []
+                
+        # 説明ラベル
+        Label(common_frame, 
+              text="以下の条件は全ての曲に共通で適用されます。\n特定の曲だけ異なる条件を設定したい場合は「曲ごとに設定」にチェックを入れてください。",
+              font=("メイリオ", 9),
+              fg="#666666",
+              bg="#f8f8f8",
+              justify="left").pack(pady=(0, 10))
+        
+        # 共通条件の各項目の幅設定（1150pxに収まるように調整）
+        column_widths = {
+            'label': 6,    # 項目ラベル（少し狭く）
+            'type': 14,     # 条件タイプ
+            'comp': 8,      # 比較方法
+            'normal': 8,    # 通常条件
+            'gold': 8,      # 金条件
+            'checkbox': 12  # チェックボックス
+        }
+        
+        # 共通条件を配置するためのメインフレーム
+        common_items_frame = Frame(common_frame, bg="#f8f8f8")
+        common_items_frame.pack(fill="x", padx=5)
+        
         self.common_type_combos = {}
         self.common_comp_combos = {}
         self.common_normal_entries = {}
@@ -3032,40 +3550,130 @@ class TJAEditor:
         
         for idx, (typ, comp, n, g) in enumerate(self.DAN_DEFAULTS):
             item = self.DAN_ITEMS[idx]
-            row = Frame(self.common_frame)
-            row.grid(row=idx, column=0, sticky="w", pady=5, padx=5)
-            Label(row, text=f"{item}:", font=("MS Gothic", 11)).grid(row=0, column=0, padx=5)
-            tc = ttk.Combobox(row, values=self.exam_types, width=12, state="readonly", font=("MS Gothic", 10))
-            tc.grid(row=0, column=1, padx=3)
+            
+            # 各条件のフレーム
+            item_frame = Frame(common_items_frame, bg="#f8f8f8")
+            item_frame.pack(fill="x", pady=2, padx=5)
+            
+            # 項目ラベル - 左側に配置
+            label_frame = Frame(item_frame, bg="#f8f8f8")
+            label_frame.pack(side="left", padx=(0, 5))
+            Label(label_frame, text=f"{item}:", 
+                  font=("メイリオ", 10, "bold"),
+                  width=column_widths['label'],
+                  anchor="w",
+                  bg="#f8f8f8").pack()
+            
+            # 設定ウィジェットのフレーム
+            settings_frame = Frame(item_frame, bg="#f8f8f8")
+            settings_frame.pack(side="left", fill="x", expand=True)
+            
+            # 条件タイプ選択
+            tc = ttk.Combobox(settings_frame, 
+                              values=self.exam_types, 
+                              width=column_widths['type'],
+                              state="readonly",
+                              font=("メイリオ", 9))
+            tc.pack(side="left", padx=2)
             tc.set(typ)
-            cc = ttk.Combobox(row, values=self.comparisons_jp, width=8, state="readonly", font=("MS Gothic", 10))
-            cc.grid(row=0, column=2, padx=3)
+            
+            # 比較方法選択
+            cc = ttk.Combobox(settings_frame, 
+                              values=self.comparisons_jp,
+                              width=column_widths['comp'],
+                              state="readonly",
+                              font=("メイリオ", 9))
+            cc.pack(side="left", padx=2)
             cc.set(comp)
-            ne = Entry(row, width=10, font=("MS Gothic", 10))
-            ne.grid(row=0, column=3, padx=3)
+            
+            # 通常条件
+            ne = Entry(settings_frame, 
+                       width=column_widths['normal'],
+                       font=("メイリオ", 9),
+                       justify="center",
+                       bg="#ffffff",
+                       relief="sunken",
+                       bd=1)
+            ne.pack(side="left", padx=2)
             ne.insert(0, n)
-            Label(row, text="/", font=("MS Gothic", 10)).grid(row=0, column=4)
-            ge = Entry(row, width=10, font=("MS Gothic", 10))
-            ge.grid(row=0, column=5, padx=3)
+            
+            Label(settings_frame, text=" / ", 
+                  font=("メイリオ", 9),
+                  bg="#f8f8f8").pack(side="left", padx=1)
+            
+            # 金条件
+            ge = Entry(settings_frame, 
+                       width=column_widths['gold'],
+                       font=("メイリオ", 9),
+                       justify="center",
+                       bg="#fffacd",
+                       relief="sunken",
+                       bd=1)
+            ge.pack(side="left", padx=2)
             ge.insert(0, g)
+            
+            # 右側のチェックボックスフレーム
+            checkbox_frame = Frame(settings_frame, bg="#f8f8f8")
+            checkbox_frame.pack(side="right", padx=(10, 0))
+            
+            # 曲ごと設定チェックボックス
+            var = tk.IntVar(value=0)
+            cb = Checkbutton(checkbox_frame, 
+                             text="曲ごとに設定",
+                             variable=var,
+                             command=lambda i=item: self.toggle_per_song(i),
+                             font=("メイリオ", 9),
+                             bg="#f8f8f8")
+            cb.pack()
+            
+            # ウィジェットを保存
             self.common_type_combos[item] = tc
             self.common_comp_combos[item] = cc
             self.common_normal_entries[item] = ne
             self.common_gold_entries[item] = ge
-            var = tk.IntVar(value=0)
-            cb = Checkbutton(row, text="曲ごとに設定", variable=var, command=lambda i=item: self.toggle_per_song(i), font=("MS Gothic", 10))
-            cb.grid(row=0, column=6, padx=20)
             self.per_song_vars[item] = var
-            pf = LabelFrame(container, text=f"{item} - 曲ごとの条件", font=("MS Gothic", 12), padx=10, pady=10, relief="groove", borderwidth=2)
+            
+            # 個別設定フレーム（初期非表示） - cond_inner_frame内に配置
+            pf = Frame(cond_inner_frame, padx=10, pady=10, bg="#f0f8ff", relief="ridge", bd=1)
             pf.pack_forget()
             self.per_song_frames[item] = pf
             self.per_song_widgets[item] = []
+            
             self.update_common_state(item)
         
-        self.gen_btn = Button(container, text="TJA生成", command=self.generate_dan_code,
-                              font=("MS Gothic", 15, "bold"), relief="raised", borderwidth=4, padx=30, pady=12)
-        self.gen_btn.pack(pady=30)
+        # 共通アイテムフレームのサイズ調整
+        common_items_frame.update_idletasks()
         
+        # スクロール領域更新
+        cond_inner_frame.bind("<Configure>", 
+                             lambda e: cond_canvas.configure(scrollregion=cond_canvas.bbox("all")))
+        
+        # ========== 生成ボタンフレーム（右フレーム下部に配置）==========
+        button_frame = Frame(right_frame, pady=10)
+        button_frame.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        
+        self.gen_btn = Button(button_frame, 
+                              text="TJAを生成して保存",
+                              command=self.generate_dan_code,
+                              font=("メイリオ", 12, "bold"),
+                              bg="#2196F3",
+                              fg="white",
+                              padx=30,
+                              pady=10,
+                              relief="raised",
+                              borderwidth=3)
+        self.gen_btn.pack()
+        
+        # 初期化
+        self.update_add_button()
+        
+        # ウィンドウ設定 - サイズ固定
+        self.dan_window.minsize(1150, 700)
+        self.dan_window.maxsize(1150, 700)
+        
+        # 初回表示
+        self.update_song_settings()
+    
     def _close_dan_window(self):
         # ← マウスホイールバインディング解除
         if hasattr(self, 'dan_window') and self.dan_window:
@@ -3106,27 +3714,36 @@ class TJAEditor:
     def toggle_per_song(self, item):
         var = self.per_song_vars[item]
         is_per_song = var.get()  # True=曲ごと、False=共通
-
+    
         frame = self.per_song_frames[item]
-
+    
         if is_per_song:
-            # チェックON → フレーム表示 + ウィジェット作成
+            # チェックON → フレーム表示
             if item not in self.per_song_order:
                 self.per_song_order.append(item)
-            frame.pack(pady=15, fill=tk.X, before=self.gen_btn)
-            self.create_per_song_widgets(item)
+            
+            # cond_inner_frame内に配置（合格条件タブ内）
+            frame.pack(pady=15, fill=tk.X)
+            
+            # ウィジェットを作成
+            if item not in self.per_song_widgets or len(self.per_song_widgets[item]) == 0:
+                self.create_per_song_widgets(item)
         else:
-            # チェックOFF → フレーム非表示 + 内部ウィジェットを完全破棄
+            # チェックOFF → フレーム非表示
             frame.pack_forget()
             if item in self.per_song_order:
                 self.per_song_order.remove(item)
-
-            # ← ここが最重要！ウィジェットを完全に削除
-            for widget_tuple in self.per_song_widgets[item]:
-                for w in widget_tuple:
-                    w.destroy()  # 完全破棄
-            self.per_song_widgets[item].clear()
-
+    
+            # ウィジェットを完全に削除
+            if item in self.per_song_widgets:
+                for widget_tuple in self.per_song_widgets[item]:
+                    for w in widget_tuple:
+                        try:
+                            w.destroy()
+                        except:
+                            pass
+                self.per_song_widgets[item] = []
+    
         # 共通設定の有効/無効切り替え
         self.update_common_state(item)
 
@@ -3140,27 +3757,57 @@ class TJAEditor:
 
     def create_per_song_widgets(self, item):
         frame = self.per_song_frames[item]
-        for w in frame.winfo_children():
-            w.destroy()
+        
+        # フレームをクリア
+        for widget in frame.winfo_children():
+            widget.destroy()
+        
+        # タイトルフレーム
+        title_frame = Frame(frame, bg="#f0f8ff")
+        title_frame.pack(fill="x", pady=(0, 5))
+        Label(title_frame, text=f"【{item}】 曲ごとの設定", 
+              font=("メイリオ", 10, "bold"), bg="#f0f8ff").pack(anchor="w")
+        
         self.per_song_widgets[item] = []
+        
+        # 各曲の設定（最大3曲）
         for i in range(3):
-            sub = Frame(frame)
-            Label(sub, text=f"曲{i+1}:", font=("MS Gothic", 11)).grid(row=0, column=0, padx=10, pady=5, sticky="e")
-            tc = ttk.Combobox(sub, values=self.exam_types, width=12, state="readonly", font=("MS Gothic", 10))
-            tc.grid(row=0, column=1, padx=5)
+            song_frame = Frame(frame, bg="#f0f8ff")
+            song_frame.pack(fill="x", pady=2)
+            
+            # 曲番号ラベル
+            Label(song_frame, text=f"曲{i+1}:", font=("MS Gothic", 10), 
+                  bg="#f0f8ff", width=6, anchor="w").pack(side="left", padx=(5, 5))
+            
+            # 条件タイプ選択（少し狭く）
+            tc = ttk.Combobox(song_frame, values=self.exam_types, width=12, 
+                             state="readonly", font=("MS Gothic", 9))
+            tc.pack(side="left", padx=2)
             tc.set(self.common_type_combos[item].get())
-            cc = ttk.Combobox(sub, values=self.comparisons_jp, width=8, state="readonly", font=("MS Gothic", 10))
-            cc.grid(row=0, column=2, padx=5)
+            
+            # 比較方法選択
+            cc = ttk.Combobox(song_frame, values=self.comparisons_jp, width=8, 
+                             state="readonly", font=("MS Gothic", 9))
+            cc.pack(side="left", padx=2)
             cc.set(self.common_comp_combos[item].get())
-            ne = Entry(sub, width=10, font=("MS Gothic", 10))
-            ne.grid(row=0, column=3, padx=5)
+            
+            # 通常条件
+            ne = Entry(song_frame, width=8, font=("MS Gothic", 9))
+            ne.pack(side="left", padx=2)
             ne.insert(0, self.common_normal_entries[item].get())
-            Label(sub, text="/", font=("MS Gothic", 12)).grid(row=0, column=4, padx=0)
-            ge = Entry(sub, width=10, font=("MS Gothic", 10))
-            ge.grid(row=0, column=5, padx=5)
+            
+            # スラッシュ
+            Label(song_frame, text="/", font=("MS Gothic", 11), bg="#f0f8ff").pack(side="left", padx=2)
+            
+            # 金条件
+            ge = Entry(song_frame, width=8, font=("MS Gothic", 9))
+            ge.pack(side="left", padx=2)
             ge.insert(0, self.common_gold_entries[item].get())
-            sub.pack(fill=tk.X, pady=3)
+            
             self.per_song_widgets[item].append((tc, cc, ne, ge))
+        
+        # フレームのサイズを調整
+        frame.update_idletasks()
 
     def update_song_settings(self):
         if not hasattr(self, 'song_listbox') or not self.song_listbox.winfo_exists():
@@ -3169,79 +3816,115 @@ class TJAEditor:
         self.song_listbox.delete(0, tk.END)
         if self.song_paths:
             for i, path in enumerate(self.song_paths):
-                self.song_listbox.insert(tk.END, f"{i+1}. {os.path.basename(path)}")
+                # ファイル名を短く表示
+                fname = os.path.basename(path)
+                if len(fname) > 25:
+                    fname = fname[:22] + "..."
+                self.song_listbox.insert(tk.END, f"{i+1}. {fname}")
         else:
             self.song_listbox.insert(tk.END, "（曲を追加してください）")
-
+    
         # フレームは必ず最初から作成
         container = self.dan_window.winfo_children()[0].winfo_children()[0]
         if not hasattr(self, 'song_settings_frame') or not self.song_settings_frame.winfo_exists():
             self.song_settings_frame = LabelFrame(container, text="■ 各曲の設定 ■", 
                                                 font=("メイリオ", 11, "bold"), padx=8, pady=8)
             self.song_settings_frame.pack(fill=tk.X, pady=(8, 0), before=self.gen_btn)
-
+    
         for w in self.song_settings_frame.winfo_children():
             w.destroy()
-
+    
         course_names = ["Easy", "Normal", "Hard", "Oni", "Edit"]
         course_jp   = ["かんたん", "ふつう", "むずかしい", "鬼", "裏鬼"]
         genres = ["ポップス","キッズ","アニメ","ボーカロイド","ゲームミュージック","バラエティ","クラシック","ナムコオリジナル"]
-
+    
+        # ウィジェットの幅を調整（横幅1150pxに収まるように）
+        column_widths = {
+            0: 4,    # 曲番号
+            1: 28,   # ファイル名
+            2: 12,   # 難易度
+            3: 4,    # LEVEL
+            4: 6,    # GENREラベル
+            5: 20,   # GENRE選択（少し狭く）
+            6: 5,    # INITラベル
+            7: 7,    # INIT入力
+            8: 5,    # DIFFラベル
+            9: 7     # DIFF入力
+        }
+    
         for i in range(max(len(self.song_paths), 1)):
             row = Frame(self.song_settings_frame)
-            row.pack(fill=tk.X, pady=4)
-
+            row.pack(fill=tk.X, pady=2)
+    
             if i < len(self.song_paths):
                 path = self.song_paths[i]
                 fname = os.path.basename(path)
-                disp = fname if len(fname) <= 28 else "…" + fname[-26:]
-
+                # ファイル名表示を短く
+                disp = fname if len(fname) <= 20 else fname[:17] + "..."
+    
                 # 曲番号
-                Label(row, text=f"曲{i+1}", font=("MS Gothic", 11, "bold")).grid(row=0, column=0, padx=(4,2))
-
-                # ファイル名（28文字まで）
-                Label(row, text=disp, font=("MS Gothic", 10), fg="#333399", anchor="w").grid(row=0, column=1, sticky="w", padx=(0,6))
-
-                # 難易度（width=8）
+                Label(row, text=f"曲{i+1}", font=("MS Gothic", 10, "bold"), 
+                      width=column_widths[0], anchor="w").grid(row=0, column=0, padx=(2,2), sticky="w")
+    
+                # ファイル名
+                Label(row, text=disp, font=("MS Gothic", 9), fg="#333399", 
+                      anchor="w", width=column_widths[1]).grid(row=0, column=1, padx=(0,2), sticky="w")
+    
+                # 難易度選択
                 avail = self.song_course_values.get(i, [])
                 avail_jp = [course_jp[course_names.index(c)] for c in avail if c in course_names]
                 cur = self.song_courses_temp.get(i, avail_jp[0] if avail_jp else "鬼")
-                cbox = ttk.Combobox(row, values=avail_jp, width=10, font=("MS Gothic", 10), state="readonly")
+                cbox = ttk.Combobox(row, values=avail_jp, width=column_widths[2]-2, 
+                                   font=("MS Gothic", 9), state="readonly")
                 cbox.set(cur)
-                cbox.grid(row=0, column=2, padx=2)
+                cbox.grid(row=0, column=2, padx=2, sticky="w")
                 cbox.bind("<<ComboboxSelected>>", lambda e, idx=i, cb=cbox: self.on_course_changed(idx, cb))
-
-                #LEVEL
+    
+                # LEVEL表示
                 lv = self.song_levels.get(i, "?")
-                Label(row, text=f"★{lv}", font=("MS Gothic", 11), fg="#0066cc", width=4, anchor="w").grid(row=0, column=3, padx=2)
-
-                # GENRE（width=14でギリ収まる）
-                Label(row, text="GENRE:", font=("MS Gothic", 10, "bold"), fg="#008800").grid(row=0, column=4, padx=(10,1))
-                gbox = ttk.Combobox(row, values=genres, width=18, font=("MS Gothic", 9), state="readonly")
+                Label(row, text=f"★{lv}", font=("MS Gothic", 10), fg="#0066cc", 
+                      width=column_widths[3], anchor="w").grid(row=0, column=3, padx=2, sticky="w")
+    
+                # GENRE選択
+                Label(row, text="GENRE:", font=("MS Gothic", 9, "bold"), fg="#008800",
+                      width=column_widths[4], anchor="w").grid(row=0, column=4, padx=(8,1), sticky="w")
+                gbox = ttk.Combobox(row, values=genres, width=column_widths[5]-2, 
+                                   font=("MS Gothic", 8), state="readonly")
                 gbox.set(self.song_genres.get(i, "ナムコオリジナル"))
-                gbox.grid(row=0, column=5, padx=1)
+                gbox.grid(row=0, column=5, padx=1, sticky="w")
                 gbox.bind("<<ComboboxSelected>>", lambda e, idx=i: self.song_genres.__setitem__(idx, gbox.get()))
-
-                # INIT / DIFF
-                Label(row, text="INIT:", font=("MS Gothic", 10, "bold"), fg="#0000aa").grid(row=0, column=6, padx=(8,1))
-                init_e = Entry(row, width=7, font=("MS Gothic", 10), justify="center", bg="#f0f8ff")
+    
+                # INIT
+                Label(row, text="INIT:", font=("MS Gothic", 9, "bold"), fg="#0000aa",
+                      width=column_widths[6], anchor="w").grid(row=0, column=6, padx=(8,1), sticky="w")
+                init_e = Entry(row, width=column_widths[7], font=("MS Gothic", 9), 
+                              justify="center", bg="#f0f8ff")
                 init_e.insert(0, self.song_scoreinit.get(i, ""))
-                init_e.grid(row=0, column=7, padx=1)
-
-                Label(row, text="DIFF:", font=("MS Gothic", 10, "bold"), fg="#cc4400").grid(row=0, column=8, padx=(6,1))
-                diff_e = Entry(row, width=7, font=("MS Gothic", 10), justify="center", bg="#fff0f0")
+                init_e.grid(row=0, column=7, padx=1, sticky="w")
+    
+                # DIFF
+                Label(row, text="DIFF:", font=("MS Gothic", 9, "bold"), fg="#cc4400",
+                      width=column_widths[8], anchor="w").grid(row=0, column=8, padx=(6,1), sticky="w")
+                diff_e = Entry(row, width=column_widths[9], font=("MS Gothic", 9), 
+                              justify="center", bg="#fff0f0")
                 diff_e.insert(0, self.song_scorediff.get(i, ""))
-                diff_e.grid(row=0, column=9, padx=1)
-
+                diff_e.grid(row=0, column=9, padx=1, sticky="w")
+    
             else:
-                Label(row, text="曲を追加すると設定がここに表示されます", font=("MS Gothic", 10), fg="#999999")\
+                Label(row, text="曲を追加すると設定がここに表示されます", 
+                      font=("MS Gothic", 9), fg="#999999")\
                     .grid(row=0, column=0, columnspan=10, pady=6)
-
+    
+            # 各列の重量設定
             row.grid_columnconfigure(1, weight=1)
-
-        self.dan_window.geometry("900x700")
-        self.dan_window.minsize(900, 700)
-        self.dan_window.maxsize(800, 1000)  # 高さだけ少し伸ばせる
+            for col in range(10):
+                if col != 1:
+                    row.grid_columnconfigure(col, weight=0)
+        
+        # サイズを変更しない - 固定サイズのまま
+        # ウィンドウのレイアウトを更新するだけ
+        if hasattr(self, 'dan_window') and self.dan_window:
+            self.dan_window.update_idletasks()
             
     def on_course_changed(self, song_idx, combobox):
         selected = combobox.get()
