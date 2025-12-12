@@ -2539,8 +2539,6 @@ class TJAEditor:
     def show_version(self):
         version_info = """
         TJA Editor
-        バージョン: 1.0.0 (2025-12-05)
-        ビルド: Final Release
         
         主な機能:
         ・配布用ZIP自動作成 (Ctrl+E)
@@ -2568,10 +2566,6 @@ class TJAEditor:
         ・配布ZIPが1クリックで完成
         ・音源からBPM/OFFSETを自動補正
         
-        これからも自作譜面文化を支えるツールとして
-        進化し続けます。
-        
-        ありがとうございます。
         """.strip()
         messagebox.showinfo("このエディタについて", about_text)
         
@@ -3497,47 +3491,55 @@ class TJAEditor:
         cond_inner_frame = Frame(cond_canvas, padx=15, pady=15)
         cond_canvas.create_window((0, 0), window=cond_inner_frame, anchor="nw")
         
-        # 共通合格条件セクション
-        common_frame = LabelFrame(cond_inner_frame, 
-                                  text="共通合格条件 (全ての曲に適用)",
-                                  font=("メイリオ", 11, "bold"),
-                                  padx=15,
-                                  pady=15,
-                                  bg="#f8f8f8",
-                                  relief="groove")
-        common_frame.pack(fill="x", pady=(0, 15))
+        # === 共通合格条件セクション ===
+        # 共通条件を中央に配置するための外側コンテナ
+        common_outer_frame = Frame(cond_inner_frame, bg="#f0f0f0")
+        common_outer_frame.pack(fill="both", expand=True, pady=20)  # 上下に余白
         
-        # グリッドレイアウトで条件を整列（横幅に収まるように調整）
-        self.common_type_combos = {}
-        self.common_comp_combos = {}
-        self.common_normal_entries = {}
-        self.common_gold_entries = {}
-        self.per_song_vars = {}
-        self.per_song_frames = {}
-        self.per_song_widgets = {}
-        self.per_song_order = []
-                
-        # 説明ラベル
+        # 垂直方向の中央配置用フレーム
+        vertical_center_frame = Frame(common_outer_frame, bg="#f0f0f0")
+        vertical_center_frame.pack(fill="both", expand=True)
+        
+        # 水平方向の中央配置用フレーム
+        horizontal_center_frame = Frame(vertical_center_frame, bg="#f0f0f0")
+        horizontal_center_frame.pack(expand=True)
+        
+        # 共通条件フレーム本体
+        common_frame = LabelFrame(horizontal_center_frame, 
+                                 text="共通合格条件 (全ての曲に適用)",
+                                 font=("メイリオ", 11, "bold"),
+                                 padx=20,
+                                 pady=15,
+                                 bg="#f8f8f8",
+                                 relief="groove")
+        common_frame.pack()
+        
+        # 説明ラベル（中央揃え）
         Label(common_frame, 
-              text="以下の条件は全ての曲に共通で適用されます。\n特定の曲だけ異なる条件を設定したい場合は「曲ごとに設定」にチェックを入れてください。",
+              text="以下の条件は全ての曲に共通で適用されます。",
               font=("メイリオ", 9),
               fg="#666666",
-              bg="#f8f8f8",
-              justify="left").pack(pady=(0, 10))
+              bg="#f8f8f8").pack(pady=(0, 2))
         
-        # 共通条件の各項目の幅設定（1150pxに収まるように調整）
+        Label(common_frame, 
+              text="特定の曲だけ異なる条件を設定したい場合は「曲ごとに設定」にチェックを入れてください。",
+              font=("メイリオ", 9),
+              fg="#666666",
+              bg="#f8f8f8").pack(pady=(0, 15))
+        
+        # 共通条件の各項目の幅設定
         column_widths = {
-            'label': 6,    # 項目ラベル（少し狭く）
-            'type': 14,     # 条件タイプ
-            'comp': 8,      # 比較方法
-            'normal': 8,    # 通常条件
-            'gold': 8,      # 金条件
-            'checkbox': 12  # チェックボックス
+            'label': 6,    # 項目ラベル
+            'type': 14,    # 条件タイプ
+            'comp': 8,     # 比較方法
+            'normal': 8,   # 通常条件
+            'gold': 8,     # 金条件
+            'checkbox': 12 # チェックボックス
         }
         
         # 共通条件を配置するためのメインフレーム
         common_items_frame = Frame(common_frame, bg="#f8f8f8")
-        common_items_frame.pack(fill="x", padx=5)
+        common_items_frame.pack()
         
         self.common_type_combos = {}
         self.common_comp_combos = {}
@@ -3549,16 +3551,19 @@ class TJAEditor:
         self.per_song_order = []
         
         for idx, (typ, comp, n, g) in enumerate(self.DAN_DEFAULTS):
-            item = self.DAN_ITEMS[idx]
+            # EXAM1~4を「条件1~4」に変更
+            condition_number = idx + 1
+            display_item = f"条件{condition_number}"
+            internal_item = self.DAN_ITEMS[idx]  # 内部識別子はEXAM1~4のまま
             
             # 各条件のフレーム
             item_frame = Frame(common_items_frame, bg="#f8f8f8")
-            item_frame.pack(fill="x", pady=2, padx=5)
+            item_frame.pack(fill="x", pady=5, padx=10)
             
-            # 項目ラベル - 左側に配置
+            # 項目ラベル
             label_frame = Frame(item_frame, bg="#f8f8f8")
-            label_frame.pack(side="left", padx=(0, 5))
-            Label(label_frame, text=f"{item}:", 
+            label_frame.pack(side="left", padx=(0, 10))
+            Label(label_frame, text=f"{display_item}:",
                   font=("メイリオ", 10, "bold"),
                   width=column_widths['label'],
                   anchor="w",
@@ -3614,35 +3619,36 @@ class TJAEditor:
             
             # 右側のチェックボックスフレーム
             checkbox_frame = Frame(settings_frame, bg="#f8f8f8")
-            checkbox_frame.pack(side="right", padx=(10, 0))
+            checkbox_frame.pack(side="right", padx=(20, 0))
             
             # 曲ごと設定チェックボックス
             var = tk.IntVar(value=0)
             cb = Checkbutton(checkbox_frame, 
                              text="曲ごとに設定",
                              variable=var,
-                             command=lambda i=item: self.toggle_per_song(i),
+                             command=lambda i=internal_item: self.toggle_per_song(i),
                              font=("メイリオ", 9),
                              bg="#f8f8f8")
             cb.pack()
             
             # ウィジェットを保存
-            self.common_type_combos[item] = tc
-            self.common_comp_combos[item] = cc
-            self.common_normal_entries[item] = ne
-            self.common_gold_entries[item] = ge
-            self.per_song_vars[item] = var
+            self.common_type_combos[internal_item] = tc
+            self.common_comp_combos[internal_item] = cc
+            self.common_normal_entries[internal_item] = ne
+            self.common_gold_entries[internal_item] = ge
+            self.per_song_vars[internal_item] = var
             
             # 個別設定フレーム（初期非表示） - cond_inner_frame内に配置
             pf = Frame(cond_inner_frame, padx=10, pady=10, bg="#f0f8ff", relief="ridge", bd=1)
             pf.pack_forget()
-            self.per_song_frames[item] = pf
-            self.per_song_widgets[item] = []
+            self.per_song_frames[internal_item] = pf
+            self.per_song_widgets[internal_item] = []
             
-            self.update_common_state(item)
+            self.update_common_state(internal_item)
         
-        # 共通アイテムフレームのサイズ調整
-        common_items_frame.update_idletasks()
+        # 余白を追加してより中央に見えるように
+        spacer_frame = Frame(cond_inner_frame, height=20, bg="#f0f0f0")
+        spacer_frame.pack(fill="x")
         
         # スクロール領域更新
         cond_inner_frame.bind("<Configure>", 
@@ -3719,21 +3725,38 @@ class TJAEditor:
     
         if is_per_song:
             # チェックON → フレーム表示
+            # 条件1〜4の順番で管理
             if item not in self.per_song_order:
-                self.per_song_order.append(item)
-            
-            # cond_inner_frame内に配置（合格条件タブ内）
-            frame.pack(pady=15, fill=tk.X)
+                # 正しい順序で追加
+                item_order = {
+                    "EXAM1": 1,
+                    "EXAM2": 2,
+                    "EXAM3": 3,
+                    "EXAM4": 4
+                }
+                current_order = item_order.get(item, 5)
+                
+                # 挿入位置を探す
+                insert_index = 0
+                for i, existing_item in enumerate(self.per_song_order):
+                    existing_order = item_order.get(existing_item, 6)
+                    if current_order < existing_order:
+                        break
+                    insert_index = i + 1
+                
+                self.per_song_order.insert(insert_index, item)
             
             # ウィジェットを作成
             if item not in self.per_song_widgets or len(self.per_song_widgets[item]) == 0:
                 self.create_per_song_widgets(item)
+            
+            # すべてのフレームを正しい順序で再配置
+            self.rearrange_per_song_frames()
         else:
             # チェックOFF → フレーム非表示
-            frame.pack_forget()
             if item in self.per_song_order:
                 self.per_song_order.remove(item)
-    
+            
             # ウィジェットを完全に削除
             if item in self.per_song_widgets:
                 for widget_tuple in self.per_song_widgets[item]:
@@ -3743,9 +3766,25 @@ class TJAEditor:
                         except:
                             pass
                 self.per_song_widgets[item] = []
+            
+            # 残りのフレームを再配置
+            self.rearrange_per_song_frames()
     
         # 共通設定の有効/無効切り替え
         self.update_common_state(item)
+    
+    
+    def rearrange_per_song_frames(self):
+        """曲ごと設定フレームを条件1〜4の順番で再配置"""
+        # 現在表示中のフレームをすべて非表示にする
+        for item in self.DAN_ITEMS:
+            if item in self.per_song_frames:
+                self.per_song_frames[item].pack_forget()
+        
+        # 順番通りに表示する（条件1→条件2→条件3→条件4）
+        for item in self.per_song_order:
+            if item in self.per_song_frames and self.per_song_vars[item].get():
+                self.per_song_frames[item].pack(pady=15, fill=tk.X)
 
     def update_common_state(self, item):
         state = "disabled" if self.per_song_vars[item].get() else "readonly"
@@ -3762,10 +3801,21 @@ class TJAEditor:
         for widget in frame.winfo_children():
             widget.destroy()
         
+        # EXAM1~4を条件1~4に変換するマッピング
+        exam_to_condition = {
+            "EXAM1": "条件1",
+            "EXAM2": "条件2", 
+            "EXAM3": "条件3",
+            "EXAM4": "条件4"
+        }
+        
+        # 表示用の条件名を取得
+        condition_name = exam_to_condition.get(item, item)
+        
         # タイトルフレーム
         title_frame = Frame(frame, bg="#f0f8ff")
         title_frame.pack(fill="x", pady=(0, 5))
-        Label(title_frame, text=f"【{item}】 曲ごとの設定", 
+        Label(title_frame, text=f"【{condition_name}】",  # ← ここを修正
               font=("メイリオ", 10, "bold"), bg="#f0f8ff").pack(anchor="w")
         
         self.per_song_widgets[item] = []
