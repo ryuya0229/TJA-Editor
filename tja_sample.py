@@ -2,9 +2,6 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, Toplevel, ttk
 from tkinter import font as tkfont
 from tkinter import Listbox, Scrollbar, Button, Entry, Label, Frame, LabelFrame, Checkbutton
-import numpy as np
-import matplotlib.pyplot as plt
-plt.rcParams["font.family"] = "MS Gothic"
 import re
 import sys
 import subprocess
@@ -13,18 +10,7 @@ import shutil
 import json
 import chardet
 import datetime
-
-try:
-    from pydub import AudioSegment
-    PYDUB_AVAILABLE = True
-except ImportError:
-    PYDUB_AVAILABLE = False
-    
-try:
-    import librosa
-    LIBROSA_AVAILABLE = True
-except ImportError:
-    LIBROSA_AVAILABLE = False
+import threading
 
 class TJAEditor:
     CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tja_editor_config.json")
@@ -39,8 +25,18 @@ class TJAEditor:
         ("不可の数", "～未満", "0", "0"),
         ("スコア", "～以上", "0", "0")
     ]
-
+    def get_config_path(self):
+           """exe化された環境でも正しくconfigファイルのパスを取得"""
+           if getattr(sys, 'frozen', False):
+               # exe化された場合
+               base_path = os.path.dirname(sys.executable)
+           else:
+               # スクリプト実行の場合
+               base_path = os.path.dirname(os.path.abspath(__file__))
+           return os.path.join(base_path, "tja_editor_config.json")
+       
     def __init__(self, root):
+        self.CONFIG_FILE = self.get_config_path()
         self.root = root
         self.root.title("TJA Editor - 新規ファイル")
         self.root.geometry("1000x750")
@@ -59,6 +55,15 @@ class TJAEditor:
         self.song_courses_temp = {}
         self.dan_window = None
         self.search_window = None
+        self.preview_running = False
+        self.preview_process = None
+        self.taikojiro_path = None
+        self._change_timer = None  # タイマーID保存
+        self._key_pressed = False  # 長押しフラグ
+        # 変更追跡用の追加属性
+        self._unsaved_changes = False
+        self._text_content_hash = None  # 内容のハッシュを保存
+            
         # フォント設定(全環境対応)
         if "BIZ UDPゴシック" in tkfont.families():
             self.main_font = ("BIZ UDPゴシック", 16)
@@ -76,6 +81,7 @@ class TJAEditor:
         # 行番号のクリックイベント
         self.linenumbers.bind("<Button-1>", self.on_linenumber_click)
         self.linenumbers.bind("<B1-Motion>", self.on_linenumber_drag)
+        self.root.after(1000, self.check_taikojiro_path_on_startup)
         self.popup = tk.Menu(self.text, tearoff=0)
     
         self.popup.add_command(label="元に戻す          Ctrl+Z", command=lambda: self.text.event_generate("<<Undo>>"))
@@ -96,10 +102,12 @@ class TJAEditor:
     
         self.text.bind("<Button-3>", show_popup)
         self.text.bind("<Control-Button-1>", show_popup)
+        self.text.bind("<<Modified>>", self._on_text_modified_enhanced)
 
     def _create_menu(self):
         menubar = tk.Menu(self.root)
         filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="新規作成", command=self.new_file, accelerator="Ctrl+N")
         filemenu.add_command(label="開く", command=self.open_file, accelerator="Ctrl+O")
         filemenu.add_separator()
         recent_menu = tk.Menu(filemenu, tearoff=0)
@@ -128,16 +136,22 @@ class TJAEditor:
         headermenu = tk.Menu(menubar, tearoff=0)
         headermenu.add_command(label="TITLE:", command=lambda: self.insert_with_input("TITLE:", "曲名を入力"))
         headermenu.add_command(label="SUBTITLE:", command=lambda: self.insert_with_input("SUBTITLE:", "サブタイトルを入力"))
-        headermenu.add_command(label="LEVEL:", command=lambda: self.insert_with_input("LEVEL:", "レベル (1-10)", "7"))
-        headermenu.add_command(label="SCOREINIT:", command=lambda: self.insert_with_input("SCOREINIT:", "初期スコア", "1000"))
-        headermenu.add_command(label="SCOREMODE:", command=lambda: self.insert_with_input("SCOREMODE:", "スコアモード (1 or 2)", "2"))
-        headermenu.add_command(label="SCOREDIFF:", command=lambda: self.insert_with_input("SCOREDIFF:", "スコア差分", "100"))
-        headermenu.add_command(label="WAVE: (OGGからBPM取得)", command=self.insert_wave_with_bpm)
+        headermenu.add_command(label="WAVE:", command=lambda: self.insert_with_input("WAVE:", "音源ファイル(song.ogg)",".ogg"))
+        headermenu.add_command(label="BPM:", command=lambda: self.insert_with_input("BPM:", "BPMを入力","120"))
         headermenu.add_command(label="OFFSET:", command=lambda: self.insert_with_input("OFFSET:", "オフセット(秒)", "0"))
+        headermenu.add_command(label="SONGVOL:", command=lambda: self.insert_with_input("SONGVOL:", "曲の音量","100"))
+        headermenu.add_command(label="SEVOL:", command=lambda: self.insert_with_input("SEVOL:", "効果音量","100"))
+        headermenu.add_command(label="DEMOSTART:", command=lambda: self.insert_with_input("DEMOSTART:", "デモスタート"))
+        headermenu.add_command(label="SCOREMODE:", command=lambda: self.insert_with_input("SCOREMODE:", "スコアモード (1 or 2)", "2"))
+        headermenu.add_separator()
         coursemenu = tk.Menu(headermenu, tearoff=0)
         for course in ["Easy", "Normal", "Hard", "Oni", "Edit"]:
             coursemenu.add_command(label=course, command=lambda c=course: self.insert_course_only(c))
         headermenu.add_cascade(label="COURSE:", menu=coursemenu)
+        headermenu.add_command(label="LEVEL:", command=lambda: self.insert_with_input("LEVEL:", "レベル (1-10)", "7"))
+        headermenu.add_command(label="BALLOON:", command=lambda: self.insert_with_input("BALLOON:", "風船音符"))
+        headermenu.add_command(label="SCOREINIT:", command=lambda: self.insert_with_input("SCOREINIT:", "初期スコア", "1000"))
+        headermenu.add_command(label="SCOREDIFF:", command=lambda: self.insert_with_input("SCOREDIFF:", "スコア差分", "100"))
         menubar.add_cascade(label="ヘッダー挿入", menu=headermenu)
     
         notemenu = tk.Menu(menubar, tearoff=0)
@@ -177,21 +191,16 @@ class TJAEditor:
         
         toolmenu = tk.Menu(menubar, tearoff=0)
         # ========== 音源・タイミング調整 ==========
-        if PYDUB_AVAILABLE:
-            toolmenu.add_command(label="OFFSET自動計測(WAV/OGG対応)", command=self.auto_measure_offset_ogg)
-            toolmenu.add_command(label="OFFSET自動調節(波形表示+精密調整)", command=self.auto_adjust_offset)
-        else:
-            toolmenu.add_command(label="OFFSET自動計測(無効・pydub未導入)",command=lambda: messagebox.showwarning("機能無効", "pydub がインストールされていないため利用できません"))
-            toolmenu.add_command(label="BPMカウンター(タップテンポ)", command=self.open_bpm_counter)
-            toolmenu.add_command(label="OFFSET一括調整", command=self.open_offset_adjuster)
+        toolmenu.add_command(label="BPMカウンター(タップテンポ)", command=self.open_bpm_counter)
+        toolmenu.add_command(label="OFFSET一括調整", command=self.open_offset_adjuster)
         toolmenu.add_separator()
         
         # ========== プレビュー・再生 ==========
         toolmenu.add_command(label="太鼓さん次郎でプレビュー再生", command=self.preview_play, accelerator="F5")
-        toolmenu.add_command(label="太鼓さん次郎のパスを再設定...", command=self.reset_taikojiro_path)
+        toolmenu.add_command(label="太鼓さん次郎のパスを設定", command=self.setup_taikojiro_path)
         toolmenu.add_separator()
         # ========== 譜面分析・検証 ==========
-        toolmenu.add_command(label="エラーチェック", command=self.check_errors, accelerator="Ctrl+Shift+E")
+        toolmenu.add_command(label="簡易エラーチェック", command=self.check_errors_simple, accelerator="Ctrl+E")
         toolmenu.add_command(label="TODO管理", command=self.open_todo_manager, accelerator="Ctrl+T")
         toolmenu.add_separator()
         
@@ -296,8 +305,10 @@ class TJAEditor:
         self.root.after(100, self.update_linenumbers)
 
     def _bind_events(self):
+        self.root.bind_all("<Control-n>", lambda e: self.new_file())
         self.root.bind_all("<Control-o>", lambda e: self.open_file())
         self.root.bind_all("<Control-s>", lambda e: self.save_file())
+        self.root.bind_all("<Control-e>", lambda e: self.check_errors_simple())
         self.root.bind_all("<Control-Shift-s>", lambda e: self.save_as_file())
         self.root.bind_all("<Control-f>", lambda e: self.open_search())
         self.root.bind_all("<Control-d>", lambda e: self.toggle_dark_mode())
@@ -305,15 +316,26 @@ class TJAEditor:
         self.root.bind_all("<Control-Shift-P>", lambda e: self.open_command_palette())
         self.root.bind("<F5>", lambda event: self.preview_play())
         self.root.bind_all("<Control-e>", lambda e: self.create_distribution_zip())
-        self.root.bind_all("<Control-Shift-E>", lambda e: self.check_errors())
         self.root.bind_all("<Control-t>", lambda e: self.open_todo_manager())
         
         # キー入力中もリアルタイムで行番号を更新
-        self.text.bind("<Key>", lambda e: self.root.after_idle(self.update_linenumbers))
-        self.text.bind("<KeyRelease>", lambda e: (self.root.after_idle(self.update_all), self.on_text_change()))
+        self.text.bind("<Key>", self._on_key_press)
+        self.text.bind("<KeyRelease>", self._on_key_release)
         
         self.text.bind("<ButtonRelease>", lambda e: self.root.after_idle(self.update_linenumbers))
         self.text.bind("<Configure>", lambda e: self.root.after_idle(self.update_linenumbers))
+        
+        # テキスト変更時のイベントハンドラ
+        self.text.bind("<KeyRelease>", lambda e: self.root.after_idle(self.update_all))
+        
+        # Modifiedイベントのバインディング - 簡易版
+        self.text.bind("<<Modified>>", self._on_modified)
+        
+        # ペーストイベントも監視
+        self.text.bind("<<Paste>>", lambda e: self.root.after(50, self._check_for_changes))
+        self.text.bind("<<Cut>>", lambda e: self.root.after(50, self._check_for_changes))
+        self.text.bind("<<Undo>>", lambda e: self.root.after(50, self._check_for_changes))
+        self.text.bind("<<Redo>>", lambda e: self.root.after(50, self._check_for_changes))
         
         # マウスホイール
         self.text.bind("<MouseWheel>", lambda e: (
@@ -321,41 +343,130 @@ class TJAEditor:
             self.update_linenumbers()
         ) or "break")
         self.text.bind("<Shift-MouseWheel>", lambda e: self.text.xview_scroll(-int(e.delta/120), "units") or "break")
+        
         self.statusbar.config(text="準備完了 | F5: プレビュー再生")
-        self.text.bind("<<Modified>>", self._on_text_modified)
+    
+    def _on_key_press(self, event=None):
+        self._key_pressed = True
+        self._schedule_check()  # 新しい関数でスケジュール
+
+    def _on_key_release(self, event=None):
+        self._key_pressed = False
+        self._schedule_check()
+
+    def _schedule_check(self):
+        # 既存のタイマーをキャンセルして、新しいのをセット（デバウンス）
+        if self._change_timer:
+            self.root.after_cancel(self._change_timer)
+        self._change_timer = self.root.after(100, self._perform_check)
+
+    def _perform_check(self):
+        self._change_timer = None
+        if not self._key_pressed:  # リリース後だけ本格チェック
+            self._check_for_changes()
+    
+    def _on_modified(self, event=None):
+        """Modifiedイベントハンドラ"""
+        if self.text.edit_modified():
+            self.text.edit_modified(False)
+            self._unsaved_changes = True
+            self.update_title()
+
+    def _check_for_changes(self, event=None):
+        """テキストの変更を検出して状態を更新"""
+        try:
+            # 現在の内容を取得
+            current_content = self.text.get("1.0", "end-1c")
+            
+            # 初回または前回の内容がない場合
+            if self._text_content_hash is None:
+                # 現在の内容のハッシュを保存
+                import hashlib
+                self._text_content_hash = hashlib.md5(current_content.encode('utf-8')).hexdigest()
+                self._unsaved_changes = False
+            else:
+                # ハッシュを計算して比較
+                import hashlib
+                current_hash = hashlib.md5(current_content.encode('utf-8')).hexdigest()
+                
+                if current_hash != self._text_content_hash:
+                    self._unsaved_changes = True
+                    self._text_content_hash = current_hash
+                    self.update_title()
+                    # print(f"[DEBUG] Content changed, unsaved_changes={self._unsaved_changes}")  # デバッグ用
+        except Exception as e:
+            # エラーが発生してもクラッシュしないように
+            print(f"[WARNING] Error in _check_for_changes: {e}")
 
     def load_config(self):
-        """起動時に設定を読み込む（recent_filesも確実に反映）"""
+        """起動時に設定を読み込む（なければデフォルト生成）"""
         if os.path.exists(self.CONFIG_FILE):
             try:
                 with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
                     config = json.load(f)
-                    self.recent_files = config.get("recent_files", [])
-                    self.last_folder = config.get("last_folder", os.path.expanduser("~"))
-                    self.dark_mode = config.get("dark_mode", False)
-                    
-                    self.root.after(100, self.update_recent_menu)
-                    self.root.after(150, self.apply_dark_mode)
-                    self.syntax_theme_name = config.get("syntax_theme", None)
-    
             except Exception as e:
                 print(f"設定読み込みエラー: {e}")
-                self.recent_files = []
+                config = {}
+        else:
+            config = {}
+    
+        # デフォルト適用
+        self.recent_files = config.get("recent_files", [])
+        self.last_folder = config.get("last_folder", os.path.expanduser("~"))
+        self.dark_mode = config.get("dark_mode", False)
+        self.syntax_theme_name = config.get("syntax_theme", None)
+        self.taikojiro_path = config.get("taikojiro_path", None)
+        self.first_launch_completed = config.get("first_launch_completed", False)  # 追加
+    
+        self.root.after(100, self.update_recent_menu)
+        self.root.after(150, self.apply_dark_mode)
+    
+        # ★ ファイルが無かった場合のみ生成
+        if not os.path.exists(self.CONFIG_FILE):
+            self.save_config()
         
+        # 初回起動時のみ太鼓さん次郎パスチェックを表示
+        if not self.first_launch_completed:
+            self.root.after(1500, self.check_taikojiro_path_on_startup)
+    
     def save_config(self):
-        """終了時に設定を保存"""
+        """設定変更時に設定を保存"""
         config = {
             "recent_files": self.recent_files,
             "dark_mode": self.dark_mode,
             "last_folder": self.last_folder,
-            "taikojiro_path": self.get_taikojiro_path(),
+            "taikojiro_path": self.taikojiro_path,
+            "first_launch_completed": True  # 初回起動完了フラグを追加
         }
+    
         try:
             with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"設定保存エラー: {e}")    
+        except Exception:
+            # 設定保存失敗ではアプリを止めない
+            pass
     
+    def check_taikojiro_path_on_startup(self):
+        """初回起動時にのみ太鼓さん次郎のパスを確認"""
+        # first_launch_completedフラグをチェック
+        if hasattr(self, 'first_launch_completed') and self.first_launch_completed:
+            return  # 初回起動済みの場合は表示しない
+        
+        path = self.get_taikojiro_path()
+        
+        if not path or not os.path.isfile(path):
+            # 非同期でメッセージを表示（メインウィンドウが表示された後）
+            self.root.after(1500, lambda: messagebox.showinfo(
+                "パス設定をおすすめします",
+                "太鼓さん次郎のパスが設定されていません。\n\n"
+                "「ツール」→「太鼓さん次郎のパスを設定...」から設定すると、\n"
+                "F5キーで簡単にプレビュー再生できます。"
+            ))
+        
+        # 初回起動フラグを保存
+        self.first_launch_completed = True
+        self.save_config()
+
     def apply_dark_mode(self):
         """ダークモードの見た目を強制的に適用（起動時用）"""
         if self.dark_mode:
@@ -662,7 +773,25 @@ class TJAEditor:
         # 閉じるボタン
         Button(self.compare_window, text="閉じる", command=self.compare_window.destroy,
                width=15, font=("メイリオ", 10)).pack(pady=10)
-    
+        
+    def _on_text_modified_enhanced(self, event=None):
+        """テキスト変更を確実に追跡するイベントハンドラ（カーソル復元を削除）"""
+        if self.text.edit_modified():
+            # 変更があったことを記録
+            self._unsaved_changes = True
+            self.text.edit_modified(False)  # フラグをリセット
+            self.update_title()  # タイトルに変更マークを表示
+
+            # 他の更新処理だけ行う（カーソル復元はしない！）
+            self.root.after_idle(self.on_text_change)
+            self.root.after_idle(self.update_linenumbers)
+            # 構文ハイライトも更新
+            self.root.after_idle(self.apply_syntax_highlighting)
+            
+    def on_text_change(self, event=None):
+        """テキスト変更時に構文ハイライトを更新"""
+        self.root.after_idle(self.apply_syntax_highlighting)
+            
     def execute_compare(self, backups):
         """バックアップの比較を実行"""
         idx1 = self.backup1_combo.current()
@@ -747,203 +876,486 @@ class TJAEditor:
         )
 
     def open_bpm_counter(self):
-        """リアルタイムBPMカウンターウィンドウを開く"""
-        if hasattr(self, 'bpm_window') and self.bpm_window and self.bpm_window.winfo_exists():
-            self.bpm_window.lift()
-            return
+        """コンパクトなBPMカウンター(タップテンポ) - 修正版"""
+        # 既存のウィンドウを確実にチェック
+        if hasattr(self, 'bpm_window'):
+            try:
+                if self.bpm_window and self.bpm_window.winfo_exists():
+                    self.bpm_window.lift()
+                    self.bpm_window.focus_set()
+                    return
+                else:
+                    # ウィンドウが破棄されている場合はクリーンアップ
+                    self.bpm_window = None
+            except:
+                self.bpm_window = None
         
         self.bpm_window = Toplevel(self.root)
-        self.bpm_window.title("BPMカウンター (タップテンポ)")
-        self.bpm_window.geometry("500x400")
+        self.bpm_window.title("BPMカウンター")
+        self.bpm_window.geometry("550x600")
         self.bpm_window.resizable(False, False)
         self.bpm_window.transient(self.root)
         
-        # タップ記録用
+        # 閉じる時の処理
+        def on_bpm_window_close():
+            if hasattr(self, 'bpm_window') and self.bpm_window:
+                try:
+                    # キーバインディング解除
+                    self.bpm_window.unbind("<space>")
+                    self.bpm_window.unbind("<Escape>")
+                    self.bpm_window.unbind("<Delete>")
+                    self.bpm_window.unbind("<Return>")
+                    
+                    # ルートウィンドウからのバインディングも解除
+                    self.root.unbind("<space>")
+                    
+                    # ウィンドウ破棄
+                    self.bpm_window.destroy()
+                except:
+                    pass
+                finally:
+                    self.bpm_window = None
+                    
+                    # 変数クリーンアップ
+                    if hasattr(self, 'tap_times'):
+                        self.tap_times = []
+                    if hasattr(self, 'bpm_history'):
+                        self.bpm_history = []
+                    if hasattr(self, 'bpm_result'):
+                        self.bpm_result = 0
+        
+        self.bpm_window.protocol("WM_DELETE_WINDOW", on_bpm_window_close)
+        
+        # タップ記録用（確実に初期化）
         self.tap_times = []
+        self.bpm_history = []
         self.bpm_result = 0
         
-        # 説明ラベル
-        Label(self.bpm_window, text="曲に合わせてスペースキーまたはボタンをタップ！", 
-              font=("メイリオ", 12, "bold")).pack(pady=20)
+        # メインフレーム(縦レイアウト)
+        main_frame = tk.Frame(self.bpm_window)
+        main_frame.pack(fill="both", expand=True, padx=15, pady=15)
         
-        # BPM表示
-        self.bpm_display = Label(self.bpm_window, text="0.0", 
-                                font=("Arial", 72, "bold"), fg="#0066cc")
-        self.bpm_display.pack(pady=20)
+        # === 上部フレーム:タイトルと表示 ===
+        top_frame = tk.Frame(main_frame)
+        top_frame.pack(fill="x", pady=(0, 10))
         
-        Label(self.bpm_window, text="BPM", 
-              font=("メイリオ", 14)).pack()
+        # タイトル
+        tk.Label(top_frame, text="BPMカウンター", 
+                 font=("メイリオ", 13, "bold")).pack()
+        tk.Label(top_frame, text="曲に合わせてスペースキーをタップ", 
+                 font=("メイリオ", 9), fg="#666666").pack()
         
-        # タップ回数表示
-        self.tap_count_label = Label(self.bpm_window, text="タップ回数: 0", 
-                                     font=("メイリオ", 11))
-        self.tap_count_label.pack(pady=10)
+        # BPM大表示
+        display_frame = tk.Frame(main_frame)
+        display_frame.pack(fill="x", pady=10)
         
-        # タップボタン
-        tap_btn = Button(self.bpm_window, text="TAP (Space)", 
-                         command=self.on_tap, 
-                         font=("メイリオ", 16, "bold"),
-                         bg="#4CAF50", fg="white",
-                         width=20, height=2)
-        tap_btn.pack(pady=20)
+        self.bpm_display = tk.Label(display_frame, text="0.0", 
+                                    font=("Arial", 56, "bold"), fg="#0066cc")
+        self.bpm_display.pack()
         
-        # ボタンフレーム
-        btn_frame = Frame(self.bpm_window)
-        btn_frame.pack(pady=10)
+        tk.Label(display_frame, text="BPM", 
+                 font=("メイリオ", 13)).pack()
         
-        Button(btn_frame, text="リセット", command=self.reset_bpm, 
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
-        Button(btn_frame, text="TJAに挿入", command=self.insert_bpm_to_tja, 
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
-        Button(btn_frame, text="閉じる", command=self.bpm_window.destroy, 
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
+        # === 中央フレーム:情報表示 ===
+        info_frame = tk.Frame(main_frame)
+        info_frame.pack(fill="x", pady=8)
         
-        # スペースキーバインド
-        self.bpm_window.bind("<space>", lambda e: self.on_tap())
+        # 情報表示(横並び)
+        stats_frame = tk.Frame(info_frame)
+        stats_frame.pack()
+        
+        # 左側:タップ情報
+        left_stats = tk.Frame(stats_frame)
+        left_stats.pack(side="left", fill="x", expand=True, padx=8)
+        
+        self.tap_count_label = tk.Label(left_stats, text="タップ: 0回", 
+                                        font=("メイリオ", 10, "bold"))
+        self.tap_count_label.pack()
+        
+        # 中央:平均BPM
+        center_stats = tk.Frame(stats_frame)
+        center_stats.pack(side="left", fill="x", expand=True, padx=8)
+        
+        self.avg_bpm_label = tk.Label(center_stats, text="平均: 0.0", 
+                                      font=("メイリオ", 10, "bold"))
+        self.avg_bpm_label.pack()
+        
+        # 右側:安定度
+        right_stats = tk.Frame(stats_frame)
+        right_stats.pack(side="left", fill="x", expand=True, padx=8)
+        
+        self.stability_label = tk.Label(right_stats, text="安定度: ---", 
+                                        font=("メイリオ", 10, "bold"))
+        self.stability_label.pack()
+        
+        # === タップボタン ===
+        tap_frame = tk.Frame(main_frame)
+        tap_frame.pack(fill="x", pady=12, padx=10)
+        
+        self.tap_button = tk.Button(tap_frame, text="T A P (スペースキー)", 
+                                   command=self.on_tap_with_feedback,
+                                   font=("メイリオ", 16, "bold"),
+                                   bg="#4CAF50", fg="white",
+                                   height=2,
+                                   relief="raised", borderwidth=2)
+        self.tap_button.pack(fill="x", expand=True)
+        
+        # === 下部フレーム:履歴とボタン ===
+        bottom_frame = tk.Frame(main_frame)
+        bottom_frame.pack(fill="both", expand=True, pady=(8, 0))
+        
+        # 履歴表示
+        history_frame = tk.Frame(bottom_frame)
+        history_frame.pack(fill="both", expand=True, pady=(0, 8))
+        
+        history_label = tk.Label(history_frame, text="計測履歴", 
+                                font=("メイリオ", 10, "bold"))
+        history_label.pack(anchor="w", pady=(0, 3))
+        
+        history_container = tk.Frame(history_frame, relief="sunken", borderwidth=1)
+        history_container.pack(fill="both", expand=True)
+        
+        self.history_listbox = tk.Listbox(history_container, 
+                                          height=6,
+                                          font=("MS Gothic", 9),
+                                          relief="flat",
+                                          selectbackground="#e0e0e0")
+        self.history_listbox.pack(fill="both", expand=True, padx=2, pady=2)
+        self.history_listbox.insert(0, "タップして計測開始")
+        self.history_listbox.insert(1, "スペースキーを押すか")
+        self.history_listbox.insert(2, "TAPボタンをクリック")
+        
+        # === ボタンフレーム(履歴の下)===
+        button_frame = tk.Frame(bottom_frame)
+        button_frame.pack(fill="x", pady=(0, 3))
+        
+        # ボタンを横並びに等間隔で配置
+        button_frame.grid_columnconfigure(0, weight=1)
+        button_frame.grid_columnconfigure(1, weight=1)
+        button_frame.grid_columnconfigure(2, weight=1)
+        
+        # リセットボタン
+        reset_btn = tk.Button(button_frame, text="リセット", 
+                             command=self.reset_bpm,
+                             width=11, font=("メイリオ", 9),
+                             bg="#f44336", fg="white")
+        reset_btn.grid(row=0, column=0, padx=4, pady=3)
+        
+        # TJA挿入ボタン
+        insert_btn = tk.Button(button_frame, text="TJAに挿入", 
+                              command=self.insert_bpm_to_tja,
+                              width=11, font=("メイリオ", 9),
+                              bg="#2196F3", fg="white")
+        insert_btn.grid(row=0, column=1, padx=4, pady=3)
+        
+        # 閉じるボタン
+        close_btn = tk.Button(button_frame, text="閉じる", 
+                             command=on_bpm_window_close,
+                             width=11, font=("メイリオ", 9))
+        close_btn.grid(row=0, column=2, padx=4, pady=3)
+        
+        # === ショートカット表示(各ボタンの下)===
+        shortcut_frame = tk.Frame(bottom_frame)
+        shortcut_frame.pack(fill="x")
+        
+        # 各ショートカットを横並びに配置
+        shortcut_frame.grid_columnconfigure(0, weight=1)
+        shortcut_frame.grid_columnconfigure(1, weight=1)
+        shortcut_frame.grid_columnconfigure(2, weight=1)
+        
+        # リセットショートカット
+        reset_shortcut = tk.Label(shortcut_frame, text="Delete: リセット", 
+                                 font=("メイリオ", 7), fg="#666666")
+        reset_shortcut.grid(row=0, column=0, padx=4, pady=1)
+        
+        # TJA挿入ショートカット
+        insert_shortcut = tk.Label(shortcut_frame, text="Enter: TJA挿入", 
+                                  font=("メイリオ", 7), fg="#666666")
+        insert_shortcut.grid(row=0, column=1, padx=4, pady=1)
+        
+        # 閉じるショートカット
+        close_shortcut = tk.Label(shortcut_frame, text="ESC: 閉じる", 
+                                 font=("メイリオ", 7), fg="#666666")
+        close_shortcut.grid(row=0, column=2, padx=4, pady=1)
+        
+        # キーバインド
+        self.bpm_window.bind("<space>", lambda e: self.on_tap_with_feedback())
+        self.bpm_window.bind("<Escape>", lambda e: on_bpm_window_close())
+        self.bpm_window.bind("<Delete>", lambda e: self.reset_bpm())
+        self.bpm_window.bind("<Return>", lambda e: self.insert_bpm_to_tja())
+        
+        # フォーカス設定
         self.bpm_window.focus_set()
-
+        self.tap_button.focus_set()
+        
+        # 定期的な更新処理を開始
+        self.start_bpm_refresh_timer()
+    
+    def start_bpm_refresh_timer(self):
+        """定期的な更新タイマーを開始"""
+        if hasattr(self, 'bpm_refresh_id'):
+            # 既存のタイマーがあればキャンセル
+            self.bpm_window.after_cancel(self.bpm_refresh_id)
+        
+        def refresh_bpm_data():
+            if hasattr(self, 'bpm_window') and self.bpm_window and self.bpm_window.winfo_exists():
+                try:
+                    # 古すぎるタップデータをクリーンアップ（30秒以上前）
+                    import time
+                    current_time = time.time()
+                    if hasattr(self, 'tap_times') and self.tap_times:
+                        # 30秒以上経過したタップを削除
+                        self.tap_times = [t for t in self.tap_times if current_time - t < 30.0]
+                        
+                        # タップが少なくなったら表示を更新
+                        if len(self.tap_times) < 2:
+                            if hasattr(self, 'bpm_display') and self.bpm_display:
+                                self.bpm_display.config(text="0.0")
+                            if hasattr(self, 'avg_bpm_label') and self.avg_bpm_label:
+                                self.avg_bpm_label.config(text="平均: 0.0")
+                            
+                            # 履歴も更新
+                            if hasattr(self, 'history_listbox') and self.history_listbox:
+                                self.history_listbox.delete(0, tk.END)
+                                self.history_listbox.insert(0, "計測がタイムアウトしました")
+                                self.history_listbox.insert(1, "再度タップしてください")
+                except Exception as e:
+                    print(f"BPM更新エラー: {e}")
+                
+                # 5秒後に再度実行
+                if hasattr(self, 'bpm_window') and self.bpm_window and self.bpm_window.winfo_exists():
+                    self.bpm_refresh_id = self.bpm_window.after(5000, refresh_bpm_data)
+        
+        # 5秒後に初回実行
+        self.bpm_refresh_id = self.bpm_window.after(5000, refresh_bpm_data)
+    
+    def on_tap_with_feedback(self):
+        """タップ時の処理（視覚的フィードバック付き）"""
+        # ボタンの視覚的フィードバック
+        if hasattr(self, 'tap_button') and self.tap_button:
+            original_bg = self.tap_button.cget("bg")
+            self.tap_button.config(bg="#45a049", relief="sunken")
+            self.bpm_window.after(80, lambda: self.tap_button.config(bg=original_bg, relief="raised") if hasattr(self, 'tap_button') and self.tap_button else None)
+        
+        # 実際のタップ処理
+        self.on_tap()
+    
     def on_tap(self):
-        """タップ時の処理"""
+        """タップ時の処理（安定化版）"""
+        if not hasattr(self, 'bpm_window') or not self.bpm_window or not self.bpm_window.winfo_exists():
+            return
+        
         import time
         current_time = time.time()
+        
+        # タップ時間を確実に記録
+        if not hasattr(self, 'tap_times'):
+            self.tap_times = []
+        
+        # 最初のタップ
+        if not self.tap_times:
+            self.tap_times.append(current_time)
+            self.tap_count_label.config(text="タップ: 1")
+            self.bpm_display.config(text="--.--")
+            return
+        
+        # 直前のタップとの間隔をチェック
+        last_time = self.tap_times[-1]
+        interval = current_time - last_time
+        
+        # 合理的な間隔のみ許可（BPM 30-300に対応）
+        if interval < 0.2:  # 300BPM以上は無視（0.2秒未満）
+            return
+        if interval > 2.0:  # 30BPM以下はリセット
+            self.reset_bpm()
+            self.tap_times.append(current_time)
+            self.tap_count_label.config(text="タップ: 1")
+            return
+        
+        # タップを記録
         self.tap_times.append(current_time)
         
-        # 古いタップ（5秒以上前）を削除
-        self.tap_times = [t for t in self.tap_times if current_time - t < 5.0]
+        # 保持するタップ数を制限（最新15回）
+        if len(self.tap_times) > 15:
+            self.tap_times.pop(0)
         
-        # タップ回数更新
-        self.tap_count_label.config(text=f"タップ回数: {len(self.tap_times)}")
+        tap_count = len(self.tap_times)
+        self.tap_count_label.config(text=f"タップ: {tap_count}")
         
-        # 2回以上タップがあればBPMを計算
-        if len(self.tap_times) >= 2:
-            intervals = []
-            for i in range(1, len(self.tap_times)):
-                intervals.append(self.tap_times[i] - self.tap_times[i-1])
+        # 2回以上タップがあればBPM計算
+        if tap_count >= 2:
+            beat_count = tap_count - 1
+            time_span = self.tap_times[-1] - self.tap_times[0]
             
-            # 平均間隔からBPMを計算
-            avg_interval = sum(intervals) / len(intervals)
-            if avg_interval > 0:
-                self.bpm_result = 60.0 / avg_interval
-                self.bpm_display.config(text=f"{self.bpm_result:.1f}")
+            if time_span > 0:
+                # BPM計算
+                current_bpm = (beat_count / time_span) * 60.0
+                
+                # 結果を保存
+                self.bpm_result = current_bpm
+                
+                # 表示更新
+                self.bpm_display.config(text=f"{current_bpm:.1f}")
+                
+                # BPM履歴
+                if not hasattr(self, 'bpm_history'):
+                    self.bpm_history = []
+                
+                self.bpm_history.append(current_bpm)
+                if len(self.bpm_history) > 8:
+                    self.bpm_history.pop(0)
+                
+                # 平均BPM
+                if self.bpm_history:
+                    avg_bpm = sum(self.bpm_history) / len(self.bpm_history)
+                    self.avg_bpm_label.config(text=f"平均: {avg_bpm:.1f}")
+                
+                # 履歴表示更新
+                self.update_history_listbox_wide()
+                
+                # 安定度表示
+                if len(self.bpm_history) >= 3:
+                    recent = self.bpm_history[-3:]
+                    max_bpm = max(recent)
+                    min_bpm = min(recent)
+                    avg_recent = sum(recent) / 3
+                    variation = (max_bpm - min_bpm) / avg_recent * 100 if avg_recent > 0 else 100
+                    
+                    if variation < 2:
+                        self.stability_label.config(text="安定度: ⭐⭐⭐", fg="#4CAF50")
+                    elif variation < 5:
+                        self.stability_label.config(text="安定度: ⭐⭐", fg="#FFC107")
+                    elif variation < 10:
+                        self.stability_label.config(text="安定度: ⭐", fg="#FF9800")
+                    else:
+                        self.stability_label.config(text="安定度: 要調整", fg="#f44336")
+    
+    def update_history_listbox_wide(self):
+        """履歴リストボックスを更新"""
+        if not hasattr(self, 'history_listbox') or not self.history_listbox:
+            return
         
-        # タップボタンのフィードバック（色を一瞬変える）
-        if hasattr(self, 'bpm_window') and self.bpm_window.winfo_exists():
-            for widget in self.bpm_window.winfo_children():
-                if isinstance(widget, Button) and "TAP" in widget.cget("text"):
-                    original_bg = widget.cget("bg")
-                    widget.config(bg="#45a049")
-                    self.bpm_window.after(100, lambda: widget.config(bg=original_bg))
-
+        self.history_listbox.delete(0, tk.END)
+        
+        if hasattr(self, 'bpm_history') and self.bpm_history:
+            recent = self.bpm_history[-8:]  # 最新8件
+            
+            for i, bpm in enumerate(recent, 1):
+                # 安定度インジケーター
+                if i > 2 and len(recent) >= 3:
+                    prev_avg = sum(recent[max(0, i-3):i-1]) / min(3, i-1)
+                    diff = abs(bpm - prev_avg)
+                    diff_percent = (diff / prev_avg * 100) if prev_avg > 0 else 0
+                    
+                    if diff_percent < 2:
+                        indicator = "✓"
+                    elif diff_percent < 5:
+                        indicator = "~"
+                    else:
+                        indicator = "!"
+                    
+                    self.history_listbox.insert(tk.END, f"{i:2d}. {bpm:6.1f} BPM {indicator}")
+                else:
+                    self.history_listbox.insert(tk.END, f"{i:2d}. {bpm:6.1f} BPM")
+        else:
+            self.history_listbox.insert(0, "タップして計測開始")
+            self.history_listbox.insert(1, "スペースキーを押すか")
+            self.history_listbox.insert(2, "TAPボタンをクリック")
+        
+        # 最新項目を選択状態に
+        if self.history_listbox.size() > 0:
+            self.history_listbox.selection_set(tk.END)
+            self.history_listbox.see(tk.END)
+    
     def reset_bpm(self):
-        """BPMカウンターをリセット"""
-        self.tap_times = []
-        self.bpm_result = 0
-        self.bpm_display.config(text="0.0")
-        self.tap_count_label.config(text="タップ回数: 0")
+        """BPMカウンターを完全にリセット"""
+        # 変数のリセット
+        if hasattr(self, 'tap_times'):
+            self.tap_times = []
+        if hasattr(self, 'bpm_history'):
+            self.bpm_history = []
+        if hasattr(self, 'bpm_result'):
+            self.bpm_result = 0
+        
+        # 表示のリセット
+        if hasattr(self, 'bpm_display') and self.bpm_display:
+            self.bpm_display.config(text="0.0")
+        if hasattr(self, 'tap_count_label') and self.tap_count_label:
+            self.tap_count_label.config(text="タップ: 0")
+        if hasattr(self, 'avg_bpm_label') and self.avg_bpm_label:
+            self.avg_bpm_label.config(text="平均: 0.0")
+        if hasattr(self, 'stability_label') and self.stability_label:
+            self.stability_label.config(text="安定度: ---", fg="black")
+        
+        # 履歴表示のリセット
+        if hasattr(self, 'history_listbox') and self.history_listbox:
+            self.history_listbox.delete(0, tk.END)
+            self.history_listbox.insert(0, "リセットされました")
+            self.history_listbox.insert(1, "タップして再計測してください")
     
     def insert_bpm_to_tja(self):
         """計算したBPMをTJAに挿入"""
-        if self.bpm_result == 0:
-            messagebox.showwarning("BPM未計測", "先にタップしてBPMを計測してください。", 
-                                  parent=self.bpm_window)
+        if not hasattr(self, 'bpm_history') or not self.bpm_history:
+            messagebox.showwarning("BPM未計測", 
+                                  "先にタップしてBPMを計測してください。\n（最低2回以上のタップが必要）", 
+                                  parent=self.bpm_window if hasattr(self, 'bpm_window') and self.bpm_window else None)
             return
         
-        # 小数点以下を丸めるか確認
-        rounded_bpm = round(self.bpm_result, 2)
+        # 平均BPMを使用
+        avg_bpm = sum(self.bpm_history) / len(self.bpm_history)
+        
+        # 小数点以下を適切に丸める
+        if avg_bpm < 100:
+            rounded_bpm = round(avg_bpm, 1)  # 低速曲は小数点1桁
+        else:
+            rounded_bpm = round(avg_bpm)     # 高速曲は整数
+        
+        # 安定度メッセージ
+        stability_msg = ""
+        if len(self.bpm_history) >= 3:
+            recent = self.bpm_history[-3:]
+            max_bpm = max(recent)
+            min_bpm = min(recent)
+            variation = (max_bpm - min_bpm) / avg_bpm * 100 if avg_bpm > 0 else 100
+            stability = max(0, 100 - variation)
+            
+            if stability > 90:
+                stability_msg = "（非常に安定）"
+            elif stability > 75:
+                stability_msg = "（安定）"
+            else:
+                stability_msg = "（不安定 - 再計測推奨）"
         
         response = messagebox.askyesno(
             "BPM挿入確認",
-            f"計測されたBPM: {self.bpm_result:.2f}\n\n"
+            f"計測結果:\n"
+            f"最終: {self.bpm_result:.1f} BPM\n"
+            f"平均: {avg_bpm:.1f} BPM {stability_msg}\n\n"
             f"以下の値をTJAに挿入しますか？\n"
             f"BPM:{rounded_bpm}",
-            parent=self.bpm_window
+            parent=self.bpm_window if hasattr(self, 'bpm_window') and self.bpm_window else None
         )
         
         if response:
             self.text.insert(tk.INSERT, f"BPM:{rounded_bpm}\n")
             self.text.see(tk.INSERT)
-            self.bpm_window.destroy()
-            messagebox.showinfo("挿入完了", f"BPM:{rounded_bpm} を挿入しました！")
-        
-    def auto_adjust_offset(self):
-        wave_path = self.find_wave_path()
-        if not wave_path or not os.path.exists(wave_path):
-            messagebox.showwarning("エラー", "音声ファイルが見つかりません")
-            return
+            # 構文ハイライトを更新
+            self.root.after(10, self.apply_syntax_highlighting)
+            messagebox.showinfo("挿入完了", 
+                              f"BPM:{rounded_bpm} を挿入しました！\nF5でプレビューして確認してください。")
     
+    def play_tap_sound(self):
+        """タップ音を再生（オプション機能）"""
         try:
-            # 音声読み込み（モノラル・44.1kHz統一）
-            audio = AudioSegment.from_file(wave_path).set_channels(1).set_frame_rate(44100)
-            samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
-            sr = audio.frame_rate
-    
-            # 最初の5秒間だけ解析
-            limit = min(len(samples), sr * 5)
-            segment = samples[:limit]
-    
-            # 閾値 = 平均 + 3σ（静寂部を無視して最初の音を確実に捉える）
-            threshold = np.mean(np.abs(segment)) + 3 * np.std(np.abs(segment))
-            hits = np.where(np.abs(segment) > threshold)[0]
-    
-            if len(hits) == 0:
-                messagebox.showinfo("検出不可", "最初のドン音を検出できませんでした")
-                return
-    
-            detected_sec = hits[0] / sr
-            suggested_offset = round(-detected_sec, 3)
-    
-            # 波形表示
-            time = np.arange(limit) / sr
-            plt.figure(figsize=(10, 4))
-            plt.plot(time, segment, color="blue", linewidth=0.8)
-            plt.axvline(detected_sec, color="red", linestyle="--", linewidth=2, label=f"検出位置 {detected_sec:.3f}s")
-            plt.axhline(threshold, color="orange", linestyle=":", label="閾値")
-            plt.axhline(-threshold, color="orange", linestyle=":")
-            plt.title(f"OFFSET自動調整 - {os.path.basename(wave_path)}")
-            plt.xlabel("時間 (秒)")
-            plt.ylabel("振幅")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            plt.show()
-    
-            # ユーザー入力（キャンセル対応＋安全な変換）
-            user_input = simpledialog.askstring(
-                "OFFSET最終調整",
-                f"自動検出値: {detected_sec:.3f} 秒\n"
-                f"推奨OFFSET: {suggested_offset}\n\n"
-                "最終的なOFFSET値を入力してください（例: -0.123）\n"
-                "（空欄 = 推奨値を採用 / キャンセル = 中止）",
-                initialvalue=str(suggested_offset)
-            )
-    
-            # ← ここからが完全修正部分
-            if user_input is None:  # キャンセルボタン押された
-                return
-            if user_input.strip() == "":  # 空欄なら自動値を使う
-                final_offset = suggested_offset
-            else:
-                try:
-                    final_offset = round(float(user_input.strip()), 3)
-                except ValueError:
-                    messagebox.showerror("入力エラー", "数値を入力してください")
-                    return
-    
-            # 最終確認（ズレが大きすぎる場合は警告）
-            if abs(final_offset + detected_sec) > 0.020:  # 20ms以上ズレたら要注意
-                if not messagebox.askyesno(
-                    "確認",
-                    f"検出値との差が {abs(final_offset + detected_sec):.3f}秒 あります。\n"
-                    "それでも適用しますか？"
-                ):
-                    return
-    
-            # 適用
-            self._apply_offset_to_tja(final_offset)
-            messagebox.showinfo("完了", f"OFFSET を {final_offset} に設定しました！")
-    
-        except Exception as e:
-            messagebox.showerror("解析エラー", f"音声解析中にエラーが発生しました:\n{e}")
+            import winsound
+            winsound.Beep(800, 50)  # Windows用
+        except:
+            try:
+                import os
+                # macOS/Linux用（オプション）
+                os.system('echo -e "\\a"')
+            except:
+                pass
 
     def create_distribution_zip(self):
         """ツール → 配布用ZIPを作成（readmeなし・画像も自動収集）"""
@@ -1060,10 +1472,11 @@ class TJAEditor:
             new_lines.insert(0, f"OFFSET:{offset_value}")
 
         self.text.delete("1.0", tk.END)
-        self.text.insert("1.0", "\n".join(new_lines) + "\n")
+        self.text.insert("1.0", "\n".join(new_lines))
+        self.root.after(10, self.apply_syntax_highlighting)
         messagebox.showinfo("完了", f"OFFSET を {offset_value} に設定しました！\nF5で確認してください")
         
-    def smart_comma_on_enter(self, event=None):
+    def smart_comma_on_enter(self, event=None,Nopreview=None):
             """Enterキーを押したときに、譜面行の末尾に自動でカンマを付ける"""
             try:
                 # 現在のカーソル位置
@@ -1106,25 +1519,7 @@ class TJAEditor:
             except Exception as e:
                 # 万が一のエラーでもクラッシュしないように
                 print(f"[SmartComma] Error: {e}")
-                return None
-        
-    def reset_taikojiro_path(self):
-        """メニューからいつでも太鼓さん次郎のパスを再設定可能"""
-        if messagebox.askyesno(
-            "パス再設定",
-            "太鼓さん次郎の実行ファイル（Taikojiro.exe）を再度選択しますか？\n"
-            "（現在の設定を上書きします）"
-        ):
-            path = filedialog.askopenfilename(
-                title="太鼓さん次郎の実行ファイルを選択",
-                filetypes=[("実行ファイル", "Taikojiro.exe"), ("すべてのファイル", "*.*")],
-                initialdir=os.path.expanduser("~")
-            )
-            if path:
-                self.set_taikojiro_path(path)
-                messagebox.showinfo("設定完了", f"新しいパスを登録しました！\n{os.path.basename(path)}")
-            else:
-                messagebox.showinfo("キャンセル", "変更をキャンセルしました")
+                return Nopreview
     
     def update_recent_menu(self):
         self.recent_menu.delete(0, tk.END)
@@ -1173,11 +1568,7 @@ class TJAEditor:
         self.text.yview(*args)
         self.update_linenumbers()
 
-    def _on_text_modified(self, event=None):
-        self.text.edit_modified(False)
-        self.update_linenumbers()
-
-    def toggle_dark_mode(self, force=None):
+    def toggle_dark_mode(self, force=None, save=True):
         """
         force=None  : 通常のトグル動作
         force=True  : 強制ダークモード
@@ -1317,7 +1708,9 @@ class TJAEditor:
                                 activeforeground="SystemHighlightText")
         
         # ====== 10. 設定保存 ======
-        self.save_config()
+        if save:
+            self.save_config()
+
         
         # ====== 11. メニュー表示を更新 ======
         if hasattr(self, 'viewmenu'):
@@ -1406,15 +1799,13 @@ class TJAEditor:
         self.update_linenumbers()
         self.update_status()
         self.update_statusbar()
-        filename = os.path.basename(self.current_file) if self.current_file else "新規ファイル"
-        self.root.title(f"TJA Editor - {filename}")
+        self.update_title()
 
     def update_statusbar(self):
         """ステータスバーにブレッドクラム情報と基本情報を表示"""
         try:
             # 基本情報の取得（修正前のロジック）
             line, col = self.text.index(tk.INSERT).split('.')
-            total_notes = len(re.findall(r'[12345678]', self.text.get("1.0", tk.END)))
             filename = os.path.basename(self.current_file) if self.current_file else "新規ファイル"
             mode = "ダーク" if self.dark_mode else "ライト"
             
@@ -1574,7 +1965,7 @@ class TJAEditor:
             breadcrumb_text = " > ".join(breadcrumb)
             
             # 基本情報を追加（修正前のupdate_statusbarの形式）
-            status_text = f"{breadcrumb_text} │ 行:{line} 列:{int(col)+1} │ 総ノート:{total_notes} │ {mode}モード"
+            status_text = f"{breadcrumb_text} │ 行:{line} 列:{int(col)+1} │ {mode}モード"
             
             self.statusbar.config(text=status_text)
             
@@ -1583,11 +1974,10 @@ class TJAEditor:
             # エラー時は簡易表示
             try:
                 line, col = self.text.index(tk.INSERT).split('.')
-                total_notes = len(re.findall(r'[12345678]', self.text.get("1.0", tk.END)))
                 filename = os.path.basename(self.current_file) if self.current_file else "新規ファイル"
                 mode = "ダーク" if self.dark_mode else "ライト"
                 self.statusbar.config(
-                    text=f"{filename} │ 行:{line} 列:{int(col)+1} │ 総ノート:{total_notes} │ {mode}モード"
+                    text=f"{filename} │ 行:{line} 列:{int(col)+1} │ {mode}モード"
                 )
             except:
                 self.statusbar.config(text="準備完了")
@@ -1597,15 +1987,22 @@ class TJAEditor:
     
     def get_taikojiro_path(self):
         """設定ファイルから太鼓さん次郎の実行ファイルパスを取得"""
-        if not os.path.exists(self.CONFIG_FILE):
-            return None
-        try:
-            with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                config = json.load(f)
-                path = config.get("taikojiro_path")
-                return path if path and os.path.isfile(path) else None
-        except Exception:
-            return None
+        # 設定ファイルが存在する場合
+        if os.path.exists(self.CONFIG_FILE):
+            try:
+                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    path = config.get("taikojiro_path")
+                    
+                    # パスが文字列で、ファイルが存在するか確認
+                    if path and isinstance(path, str) and os.path.isfile(path):
+                        return path
+                    else:
+                        return None  # 明示的に None を返す
+            except Exception as e:
+                print(f"設定読み込みエラー: {e}")
+                return None
+        return None
 
     def on_linenumber_click(self, event):
         """行番号をクリックしたときの処理"""
@@ -1686,70 +2083,321 @@ class TJAEditor:
             return None
 
     def set_taikojiro_path(self, path):
-        """設定ファイルに太鼓さん次郎のパスを保存"""
-        config = {}
-        if os.path.exists(self.CONFIG_FILE):
-            try:
-                with open(self.CONFIG_FILE, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-            except Exception:
-                pass
-        config["taikojiro_path"] = path
-        try:
-            with open(self.CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            messagebox.showerror("設定保存エラー", f"設定ファイルの保存に失敗しました:\n{e}")
+        """太鼓さん次郎のパスを設定して保存"""
+        self.taikojiro_path = path
+        self.save_config()
 
-    def preview_play(self):
-        """F5キー押下時に呼び出されるプレビュー再生処理"""
-        # ファイルが保存されていない場合は警告
+
+    def setup_taikojiro_path(self):
+        """太鼓さん次郎のパスを設定（ファイル保存不要）"""
+        # 現在のパスを取得
+        current_path = self.get_taikojiro_path()
+        
+        # ダイアログメッセージの作成
+        if current_path and os.path.isfile(current_path):
+            message = (
+                f"現在の設定パス:\n{current_path}\n\n"
+                f"新しいパスを選択しますか？\n"
+                f"（キャンセルすると現在の設定を維持します）"
+            )
+        else:
+            message = (
+                "太鼓さん次郎の実行ファイル（Taikojiro.exe）を選択してください。\n\n"
+                "F5キーでプレビュー再生するために必要です。"
+            )
+        
+        # ファイル選択ダイアログ
+        path = filedialog.askopenfilename(
+            title="太鼓さん次郎の実行ファイルを選択",
+            filetypes=[
+                ("実行ファイル", "Taikojiro.exe"),
+                ("実行ファイル", "*.exe"),
+                ("すべてのファイル", "*.*")
+            ],
+            initialdir=os.path.dirname(current_path) if current_path and os.path.dirname(current_path) else os.path.expanduser("~")
+        )
+        
+        if path:
+            # パスを設定
+            self.set_taikojiro_path(path)
+            
+            # 初回起動フラグを設定（初回セットアップ完了とみなす）
+            self.first_launch_completed = True
+            self.save_config()
+            
+            # 確認メッセージ
+            filename = os.path.basename(path)
+            if filename.lower() == "taikojiro.exe":
+                messagebox.showinfo(
+                    "設定完了",
+                    f"太鼓さん次郎のパスを設定しました！\n\n"
+                    f"ファイル: {filename}\n"
+                    f"F5キーでプレビュー再生できます。"
+                )
+            else:
+                # ファイル名が違う場合の警告
+                if messagebox.askyesno(
+                    "確認",
+                    f"選択したファイル名は「{filename}」です。\n"
+                    f"太鼓さん次郎の実行ファイルは通常「Taikojiro.exe」です。\n\n"
+                    f"このパスで設定しますか？"
+                ):
+                    messagebox.showinfo(
+                        "設定完了",
+                        f"パスを設定しました。\n"
+                        f"プレビュー再生できない場合は正しい実行ファイルを選択してください。"
+                    )
+                else:
+                    # 再設定を促す
+                    self.setup_taikojiro_path()
+                    return
+            
+            # 設定を保存
+            self.save_config()
+            
+        else:
+            if not current_path:
+                # キャンセルしたがパスが未設定の場合
+                messagebox.showinfo(
+                    "設定が必要",
+                    "太鼓さん次郎のパスが設定されていません。\n"
+                    "「ツール」→「太鼓さん次郎のパスを設定...」から設定してください。"
+                )
+
+    def reset_taikojiro_path(self):
+        """メニューからいつでも太鼓さん次郎のパスを再設定可能"""
+        if messagebox.askyesno(
+            "パス再設定",
+            "太鼓さん次郎の実行ファイル（Taikojiro.exe）を再度選択しますか？\n"
+            "（現在の設定を上書きします）"
+        ):
+            path = filedialog.askopenfilename(
+                title="太鼓さん次郎の実行ファイルを選択",
+                filetypes=[("実行ファイル", "Taikojiro.exe"), ("すべてのファイル", "*.*")],
+                initialdir=os.path.expanduser("~")
+            )
+            if path:
+                # この行があることを確認！
+                self.set_taikojiro_path(path)
+                messagebox.showinfo("設定完了", f"新しいパスを登録しました！\n{os.path.basename(path)}")
+            else:
+                messagebox.showinfo("キャンセル", "変更をキャンセルしました")
+
+    def get_available_courses(self):
+        content = self.text.get("1.0", tk.END)
+        courses = []
+        for line in content.splitlines():
+            if line.strip().upper().startswith("COURSE:"):
+                courses.append(line.split(":", 1)[1].strip())
+        return courses
+    
+    def select_preview_course(self):
+        courses = self.get_available_courses()
+        if not courses:
+            return None
+    
+        # カーソル位置のCOURSEを優先
+        cursor_course = self.get_course_at_cursor()
+        if cursor_course in courses:
+            return cursor_course
+    
+        # 1つしかなければそれ
+        if len(courses) == 1:
+            return courses[0]
+    
+        # 複数ある場合だけ選択ダイアログ
+        return simpledialog.askstring(
+            "プレビューコース選択",
+            "再生するコースを入力してください:\n" + " / ".join(courses),
+            initialvalue=courses[-1]
+        )
+
+    def create_preview_tja(self, course_name):
+        lines = self.text.get("1.0", tk.END).splitlines()
+    
+        header_lines = []
+        course_lines = []
+    
+        in_target = False
+        current_course = None
+        header_done = False
+    
+        for line in lines:
+            stripped = line.strip()
+    
+            # ===== コメントは完全除外 =====
+            if stripped.startswith("//") or stripped.startswith(";"):
+                continue
+    
+            upper = stripped.upper()
+    
+            # ===== COURSE検出 =====
+            if upper.startswith("COURSE:"):
+                current_course = stripped.split(":", 1)[1].strip()
+                in_target = (current_course.lower() == course_name.lower())
+                header_done = True
+                if in_target:
+                    course_lines.append(line)
+                continue
+    
+            # ===== ヘッダー部 =====
+            if not header_done:
+                if upper.startswith((
+                    "TITLE:",
+                    "SUBTITLE:",
+                    "WAVE:",
+                    "BPM:",
+                    "OFFSET:",
+                    "SONGVOL:",
+                    "SEVOL:",
+                    "DEMOSTART:",
+                    "SCOREMODE:"
+                )):
+                    header_lines.append(line)
+                continue
+    
+            # ===== 選択中COURSEの中身 =====
+            if in_target:
+                # 行内コメント除去
+                clean = line
+                for c in ("//", ";"):
+                    if c in clean:
+                        clean = clean.split(c, 1)[0].rstrip()
+                if clean:
+                    course_lines.append(clean)
+    
+        if not course_lines:
+            raise ValueError(f"COURSE '{course_name}' が見つかりません")
+    
+        preview_path = os.path.join(
+            os.path.dirname(self.current_file),
+            "__preview_temp.tja"
+        )
+    
+        with open(preview_path, "w", encoding="cp932", errors="replace") as f:
+            f.write("\n".join(header_lines + [""] + course_lines))
+    
+        return preview_path
+
+    def get_course_at_cursor(self):
+        content = self.text.get("1.0", tk.END).splitlines()
+        cursor_line = int(self.text.index(tk.INSERT).split(".")[0]) - 1
+    
+        for i in range(cursor_line, -1, -1):
+            line = content[i].strip()
+            if line.upper().startswith("COURSE:"):
+                return line.split(":", 1)[1].strip()
+    
+        return None
+
+    def preview_play(self, event=None):
+        """F5キー：通常譜面用プレビュー（段位道場は非対応）"""
+    
+        # === 多重起動防止 ===
+        if self.preview_running:
+            messagebox.showinfo(
+                "プレビュー中",
+                "すでにプレビューが起動中です。"
+            )
+            return
+    
+        # === ファイル未保存チェック ===
         if not self.current_file:
             messagebox.showwarning(
                 "ファイル未保存",
                 "プレビュー再生するには、まずファイルを保存してください。"
             )
             return
-
-        # 未保存の変更があれば自動保存
+    
+        # === 未保存変更の自動保存 ===
         if self.text.edit_modified():
             if not messagebox.askyesno(
                 "自動保存",
                 "変更が保存されていません。\n自動で上書き保存しますか？"
             ):
                 return
-            self.save_file()  # current_file が存在するので上書き保存が走る
-
-        # 太鼓さん次郎のパス取得
+            self.save_file()
+    
+        # === コース選択（カーソル位置自動） ===
+        course = self.select_preview_course()
+        if not course:
+            return
+    
+        # === プレビュー用TJA作成 ===
+        try:
+            preview_tja = self.create_preview_tja(course)
+        except Exception as e:
+            messagebox.showerror(
+                "プレビュー生成失敗",
+                str(e)
+            )
+            return
+    
+        # === 太鼓さん次郎のパス取得 ===
         tj_path = self.get_taikojiro_path()
         if not tj_path:
-            # 初回はファイル選択ダイアログでパスを登録
             path = filedialog.askopenfilename(
                 title="太鼓さん次郎の実行ファイルを選択してください",
                 filetypes=[("実行ファイル", "Taikojiro.exe"), ("すべてのファイル", "*.*")],
                 initialdir=os.path.expanduser("~")
             )
             if not path:
-                return  # キャンセルされた場合
+                return
             self.set_taikojiro_path(path)
             tj_path = path
-
-        # 起動
+    
+        # === 起動 ===
+        import subprocess
+    
         try:
-            import subprocess
-            subprocess.Popen(
-                [tj_path, self.current_file],
-                cwd=os.path.dirname(tj_path)  # 起動ディレクトリを正しく設定
-            )
-            self.statusbar.config(
-                text=f"プレビュー起動: {os.path.basename(self.current_file)}"
+            proc = subprocess.Popen(
+                [tj_path, preview_tja],
+                cwd=os.path.dirname(tj_path)
             )
         except Exception as e:
             messagebox.showerror(
                 "起動失敗",
                 f"太鼓さん次郎を起動できませんでした。\n\n{e}"
             )
+            return
     
+        self.preview_running = True
+        self.preview_process = proc
+    
+        self.statusbar.config(
+            text=f"プレビュー起動: {course}"
+        )
+    
+        # === 終了監視＆クリーンアップ ===
+        def cleanup_preview():
+            try:
+                proc.wait()
+    
+                # 一時TJA削除
+                if os.path.exists(preview_tja):
+                    os.remove(preview_tja)
+    
+                # 対応する dat 削除
+                base = os.path.splitext(preview_tja)[0]
+                dirpath = os.path.dirname(preview_tja)
+    
+                for f in os.listdir(dirpath):
+                    if f.startswith(os.path.basename(base)) and f.lower().endswith(".dat"):
+                        try:
+                            os.remove(os.path.join(dirpath, f))
+                        except Exception:
+                            pass
+    
+            finally:
+                self.preview_running = False
+                self.preview_process = None
+    
+        threading.Thread(
+            target=cleanup_preview,
+            daemon=True
+        ).start()
+
+
     def update_linenumbers(self, event=None):
         self.linenumbers.delete("all")
         total_lines = int(self.text.index('end-1c').split('.')[0])
@@ -1813,7 +2461,7 @@ class TJAEditor:
             self.count_label.config(text=text)
 
     def open_offset_adjuster(self):
-        """OFFSET一括調整ウィンドウを開く"""
+        """OFFSET一括調整ウィンドウを開く（コンパクト固定レイアウト版）"""
         if hasattr(self, 'offset_window') and self.offset_window and self.offset_window.winfo_exists():
             self.offset_window.lift()
             return
@@ -1824,79 +2472,110 @@ class TJAEditor:
         
         self.offset_window = Toplevel(self.root)
         self.offset_window.title("OFFSET一括調整")
-        self.offset_window.geometry("600x500")
+        self.offset_window.geometry("500x400")  # コンパクトサイズ
         self.offset_window.resizable(False, False)
         self.offset_window.transient(self.root)
         
-        # 説明
-        Label(self.offset_window, text="OFFSETをリアルタイムでプレビュー調整", 
-              font=("メイリオ", 14, "bold")).pack(pady=15)
+        # グリッド設定（5行1列）
+        for i in range(5):
+            # 中央の行（2行目）に重み付け
+            self.offset_window.grid_rowconfigure(i, weight=1 if i == 2 else 0)
+        self.offset_window.grid_columnconfigure(0, weight=1)
+        
+        # 1行目: タイトルと現在値
+        header_frame = tk.Frame(self.offset_window)
+        header_frame.grid(row=0, column=0, pady=(10, 5), sticky="n")
+        
+        tk.Label(header_frame, text="OFFSET一括調整", 
+                 font=("メイリオ", 12, "bold")).pack()
+        tk.Label(header_frame, text="範囲: -5.0〜+5.0秒", 
+                 font=("メイリオ", 8), fg="#666666").pack()
         
         # 現在値表示
-        info_frame = Frame(self.offset_window)
-        info_frame.pack(pady=10)
+        current_frame = tk.Frame(header_frame)
+        current_frame.pack(pady=5)
         
-        Label(info_frame, text="現在のOFFSET:", 
-              font=("メイリオ", 11)).grid(row=0, column=0, padx=5)
-        Label(info_frame, text=f"{current_offset:.3f}" if current_offset is not None else "未設定", 
-              font=("メイリオ", 11, "bold"), fg="#0066cc").grid(row=0, column=1, padx=5)
+        tk.Label(current_frame, text="現在値:", 
+                 font=("メイリオ", 9)).pack(side="left", padx=2)
+        current_offset_label = tk.Label(current_frame, 
+                                        text=f"{current_offset:.3f}" if current_offset is not None else "未設定", 
+                                        font=("メイリオ", 9, "bold"), fg="#0066cc")
+        current_offset_label.pack(side="left", padx=2)
         
-        # スライダーフレーム
-        slider_frame = Frame(self.offset_window)
-        slider_frame.pack(pady=20, padx=30, fill="x")
-        
-        Label(slider_frame, text="調整値:", font=("メイリオ", 11)).pack()
+        # 2行目: 調整値表示とスライダー
+        slider_frame = tk.Frame(self.offset_window)
+        slider_frame.grid(row=1, column=0, pady=10, padx=20, sticky="nsew")
         
         # 調整値表示
-        self.offset_value_label = Label(slider_frame, text="0.000", 
-                                        font=("Arial", 36, "bold"), fg="#009688")
-        self.offset_value_label.pack(pady=10)
+        value_display = tk.Frame(slider_frame)
+        value_display.pack(pady=(0, 5))
+        
+        tk.Label(value_display, text="調整値:", font=("メイリオ", 10)).pack(side="left", padx=(0, 5))
+        self.offset_value_label = tk.Label(value_display, text="0.000", 
+                                            font=("Arial", 24, "bold"), fg="#009688")
+        self.offset_value_label.pack(side="left")
         
         # スライダー
-        self.offset_slider = tk.Scale(slider_frame, from_=-0.5, to=0.5, resolution=0.001,
-                                      orient=tk.HORIZONTAL, length=500,
+        self.offset_slider = tk.Scale(slider_frame, from_=-5.0, to=5.0, resolution=0.001,
+                                      orient=tk.HORIZONTAL, length=450,
                                       command=self.on_offset_change,
                                       showvalue=0)
         self.offset_slider.set(0)
-        self.offset_slider.pack(pady=10)
+        self.offset_slider.pack(pady=5)
         
-        # 範囲ラベル
-        range_frame = Frame(slider_frame)
+        # 範囲ラベル（コンパクトに）
+        range_frame = tk.Frame(slider_frame)
         range_frame.pack(fill="x")
-        Label(range_frame, text="-0.5秒", font=("メイリオ", 9)).pack(side="left")
-        Label(range_frame, text="+0.5秒", font=("メイリオ", 9)).pack(side="right")
+        tk.Label(range_frame, text="-5.0", font=("メイリオ", 8)).pack(side="left")
+        tk.Label(range_frame, text="+5.0", font=("メイリオ", 8)).pack(side="right")
         
-        # 微調整ボタン
-        fine_frame = Frame(self.offset_window)
-        fine_frame.pack(pady=15)
+        # 3行目: 微調整ボタン（コンパクトに）
+        fine_frame = tk.Frame(self.offset_window)
+        fine_frame.grid(row=2, column=0, pady=10, sticky="n")
         
-        Label(fine_frame, text="微調整:", font=("メイリオ", 10)).pack()
+        tk.Label(fine_frame, text="微調整:", font=("メイリオ", 9)).pack()
         
-        btn_frame = Frame(fine_frame)
-        btn_frame.pack(pady=5)
+        # 微調整ボタン（2段構成）
+        btn_row1 = tk.Frame(fine_frame)
+        btn_row1.pack(pady=3)
         
-        Button(btn_frame, text="-0.01", command=lambda: self.adjust_offset(-0.01),
-               width=6).pack(side="left", padx=2)
-        Button(btn_frame, text="-0.001", command=lambda: self.adjust_offset(-0.001),
-               width=6).pack(side="left", padx=2)
-        Button(btn_frame, text="リセット", command=lambda: self.offset_slider.set(0),
-               width=8).pack(side="left", padx=2)
-        Button(btn_frame, text="+0.001", command=lambda: self.adjust_offset(0.001),
-               width=6).pack(side="left", padx=2)
-        Button(btn_frame, text="+0.01", command=lambda: self.adjust_offset(0.01),
-               width=6).pack(side="left", padx=2)
+        # マイナス調整ボタン
+        tk.Button(btn_row1, text=" -0.1 ", command=lambda: self.adjust_offset(-0.1),
+                  width=6, font=("メイリオ", 8)).pack(side="left", padx=1)
+        tk.Button(btn_row1, text="-0.01", command=lambda: self.adjust_offset(-0.01),
+                  width=6, font=("メイリオ", 8)).pack(side="left", padx=1)
+        tk.Button(btn_row1, text="-0.001", command=lambda: self.adjust_offset(-0.001),
+                  width=6, font=("メイリオ", 8)).pack(side="left", padx=1)
         
-        # 適用ボタンフレーム
-        apply_frame = Frame(self.offset_window)
-        apply_frame.pack(pady=20)
+        # リセットボタン
+        reset_btn = tk.Button(btn_row1, text="リセット", command=lambda: self.offset_slider.set(0),
+                   width=7, font=("メイリオ", 8))
+        reset_btn.pack(side="left", padx=5)
         
-        Button(apply_frame, text="適用してTJAに反映", command=self.apply_offset,
-               width=20, font=("メイリオ", 11, "bold"),
-               bg="#4CAF50", fg="white").pack(side="left", padx=5)
-        Button(apply_frame, text="キャンセル", command=self.offset_window.destroy,
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
+        # プラス調整ボタン
+        tk.Button(btn_row1, text="+0.001", command=lambda: self.adjust_offset(0.001),
+                  width=6, font=("メイリオ", 8)).pack(side="left", padx=1)
+        tk.Button(btn_row1, text="+0.01", command=lambda: self.adjust_offset(0.01),
+                  width=6, font=("メイリオ", 8)).pack(side="left", padx=1)
+        tk.Button(btn_row1, text=" +0.1 ", command=lambda: self.adjust_offset(0.1),
+                  width=6, font=("メイリオ", 8)).pack(side="left", padx=1)
         
-        # 保存用
+        # 4行目: 適用ボタン（下端に固定）
+        apply_frame = tk.Frame(self.offset_window)
+        apply_frame.grid(row=3, column=0, pady=(10, 15), sticky="s")
+        
+        # 適用ボタン
+        apply_btn = tk.Button(apply_frame, text="適用してTJAに挿入", command=self.apply_offset,
+                   width=18, font=("メイリオ", 10, "bold"),
+                   bg="#4CAF50", fg="white")
+        apply_btn.pack(side="left", padx=5)
+        
+        # 閉じるボタン
+        close_btn = tk.Button(apply_frame, text="閉じる", command=self.offset_window.destroy,
+                   width=10, font=("メイリオ", 9))
+        close_btn.pack(side="left", padx=5)
+        
+        # 保存用変数
         self.original_offset = current_offset
     
     def get_current_offset(self, content):
@@ -2031,397 +2710,57 @@ class TJAEditor:
         """ウィンドウのタイトルを現在開いているファイル名＋変更マークで更新"""
         base = "TJA Editor"
         if self.current_file:
-            base += f" - {os.path.basename(self.current_file)}"
-        if self.text.edit_modified():
-            base += " ●"   # 変更があるときは ● を付ける（お好みで * でもOK）
+            filename = os.path.basename(self.current_file)
+            base += f" - {filename}"
+        else:
+            base += " - 新規ファイル"
+        
+        # 未保存の変更がある場合のみマークを表示
+        if self._unsaved_changes:
+            base += " ●"
+        
         self.root.title(base)
-        
-    def check_errors(self):
-        """譜面の一般的なエラーを自動検出（完全修正版）"""
-        content = self.text.get("1.0", tk.END)
-        if not content.strip():
-            messagebox.showinfo("エラーチェック", "譜面が空です。")
-            return
-        
-        lines = content.splitlines()
-        errors = []
-        
-        # エラー検出ロジック
-        start_count = 0
-        end_count = 0
-        in_chart = False
-        has_course = False
-        has_level = False
-        has_bpm = False
-        has_wave = False
-        
-        # コースごとの管理
-        current_course = None
-        course_balloons = {}  # {course: balloon_start_count}
-        course_balloon_ends = {}  # {course: balloon_end_count}
-        course_balloon_defs = {}  # {course: balloon_defined}
-        course_has_measure = {}  # {course: has_measure_definition}
-        course_bpm_values = {}  # {course: [bpm_values]}
-        course_scroll_values = {}  # {course: [scroll_values]}
-        
-        # 状態管理
-        balloon_stack = []  # 風船の開始位置（行番号）を記録
-        in_branch = False
-        branch_start_line = 0
-        current_bpm = None
-        current_scroll = 1.0
-        
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            upper = stripped.upper()
-            
-            # 1. #START/#END の対応チェック
-            if upper in ["#START", "#P1START", "#P2START"]:
-                if in_chart:
-                    errors.append((i, "警告", "#START が閉じられていません（二重開始）"))
-                start_count += 1
-                in_chart = True
-                balloon_stack = []  # 新しい譜面開始で風船スタックをクリア
-            elif upper in ["#END", "#P1END", "#P2END"]:
-                if not in_chart:
-                    errors.append((i, "エラー", "#END に対応する #START がありません"))
-                end_count += 1
-                in_chart = False
-                # 終了時点で未完了の風船があるかチェック
-                if balloon_stack:
-                    for line_num in balloon_stack:
-                        errors.append((line_num, "エラー", "風船が開始されましたが終了していません"))
-                balloon_stack = []
-            
-            # 2. COURSE 切り替え
-            if upper.startswith("COURSE:"):
-                has_course = True
-                course_value = stripped[7:].strip().upper()
-                # 数字を名前に変換
-                course_map = {"0": "EASY", "1": "NORMAL", "2": "HARD", "3": "ONI", "4": "EDIT"}
-                current_course = course_map.get(course_value, course_value)
-                # コースが切り替わったら状態を初期化
-                if current_course not in course_balloons:
-                    course_balloons[current_course] = 0
-                    course_balloon_ends[current_course] = 0
-                    course_balloon_defs[current_course] = 0
-                    course_has_measure[current_course] = False
-                    course_bpm_values[current_course] = []
-                    course_scroll_values[current_course] = []
-            
-            # 3. LEVEL の存在チェック
-            if upper.startswith("LEVEL:"):
-                has_level = True
-                try:
-                    level = int(stripped[6:].strip())
-                    if not (1 <= level <= 10):
-                        errors.append((i, "警告", f"LEVELの値({level})は1〜10の範囲内であるべきです"))
-                except:
-                    errors.append((i, "エラー", "LEVELの値が無効です（数値を指定してください）"))
-            
-            # 4. BPM 定義チェック
-            if upper.startswith("BPM:"):
-                has_bpm = True
-                try:
-                    bpm_value = float(stripped[4:].strip())
-                    current_bpm = bpm_value
-                    if current_course:
-                        course_bpm_values[current_course].append(bpm_value)
-                    if bpm_value <= 0:
-                        errors.append((i, "エラー", f"BPM値({bpm_value})は正の数である必要があります"))
-                    elif bpm_value < 30 or bpm_value > 300:
-                        errors.append((i, "警告", f"BPM値({bpm_value})が極端です（通常は30〜300の範囲）"))
-                except:
-                    errors.append((i, "エラー", "BPMの値が無効です（数値を指定してください）"))
-            
-            # 5. WAVE 定義チェック
-            if upper.startswith("WAVE:"):
-                has_wave = True
-                wave_file = stripped[5:].strip()
-                if not wave_file:
-                    errors.append((i, "エラー", "WAVEファイル名が指定されていません"))
-                elif not wave_file.lower().endswith(('.ogg', '.wav', '.mp3')):
-                    errors.append((i, "警告", f"WAVEファイル({wave_file})は通常.ogg/.wav/.mp3形式です"))
-            
-            # 6. #MEASURE 定義チェック
-            if upper.startswith("#MEASURE"):
-                try:
-                    measure_str = stripped[8:].strip()
-                    if "/" in measure_str:
-                        numerator, denominator = measure_str.split("/")
-                        num = int(numerator.strip())
-                        den = int(denominator.strip())
-                        if num <= 0 or den <= 0:
-                            errors.append((i, "エラー", f"#MEASUREの値({measure_str})は正の数である必要があります"))
-                        if current_course:
-                            course_has_measure[current_course] = True
-                    else:
-                        errors.append((i, "エラー", f"#MEASUREの書式が不正です: {measure_str} (例: 4/4)"))
-                except:
-                    errors.append((i, "エラー", f"#MEASUREの値が無効です: {stripped[8:]}"))
-            
-            # 7. #BPMCHANGE チェック
-            if upper.startswith("#BPMCHANGE"):
-                try:
-                    bpm_change = float(stripped[10:].strip())
-                    if bpm_change <= 0:
-                        errors.append((i, "エラー", f"#BPMCHANGE値({bpm_change})は正の数である必要があります"))
-                    elif bpm_change < 30 or bpm_change > 300:
-                        errors.append((i, "警告", f"#BPMCHANGE値({bpm_change})が極端です"))
-                    if current_course:
-                        course_bpm_values[current_course].append(bpm_change)
-                except:
-                    errors.append((i, "エラー", "#BPMCHANGEの値が無効です（数値を指定してください）"))
-            
-            # 8. #SCROLL チェック
-            if upper.startswith("#SCROLL"):
-                try:
-                    scroll_value = float(stripped[7:].strip())
-                    if scroll_value <= 0:
-                        errors.append((i, "エラー", f"#SCROLL値({scroll_value})は正の数である必要があります"))
-                    elif scroll_value < 0.5 or scroll_value > 3.0:
-                        errors.append((i, "警告", f"#SCROLL値({scroll_value})が極端です（通常は0.5〜3.0の範囲）"))
-                    if current_course:
-                        course_scroll_values[current_course].append(scroll_value)
-                except:
-                    errors.append((i, "エラー", "#SCROLLの値が無効です（数値を指定してください）"))
-            
-            # 9. #BRANCHSTART チェック
-            if upper.startswith("#BRANCHSTART"):
-                if in_branch:
-                    errors.append((i, "エラー", "#BRANCHSTART が閉じられていません（二重開始）"))
-                in_branch = True
-                branch_start_line = i
-                try:
-                    params = stripped[12:].strip()
-                    if "," in params:
-                        acc, roll = params.split(",")
-                        acc_val = int(acc.strip())
-                        roll_val = int(roll.strip())
-                        if not (0 <= acc_val <= 100):
-                            errors.append((i, "警告", f"分岐精度条件({acc_val}%)は0〜100の範囲であるべきです"))
-                        if roll_val < 0:
-                            errors.append((i, "警告", f"分岐ロール条件({roll_val})は0以上の値であるべきです"))
-                    else:
-                        errors.append((i, "エラー", "#BRANCHSTARTの書式が不正です（例: #BRANCHSTART 90,10）"))
-                except:
-                    errors.append((i, "エラー", "#BRANCHSTARTの値が無効です"))
-            
-            # 10. 分岐譜面終了チェック（簡易）
-            if upper == "#N" or upper == "#E" or upper == "#M":
-                in_branch = False
-            
-            # 11. 全角数字チェック（譜面行）
-            if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
-                if any(c in "０１２３４５６７８９" for c in stripped):
-                    errors.append((i, "エラー", "全角数字が含まれています（半角に修正してください）"))
-            
-            # 12. 風船(7)のペアリングチェック
-            if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
-                # 風船の開始と終了を追跡
-                for j, char in enumerate(stripped):
-                    if char == '7':
-                        if not balloon_stack:
-                            # 風船開始
-                            balloon_stack.append(i)
-                            if current_course:
-                                course_balloons[current_course] = course_balloons.get(current_course, 0) + 1
-                        else:
-                            # 風船終了
-                            balloon_stack.pop()
-                            if current_course:
-                                course_balloon_ends[current_course] = course_balloon_ends.get(current_course, 0) + 1
-            
-            # 13. BALLOON定義チェック（複数行対応）
-            if upper.startswith("BALLOON:"):
-                balloon_line = stripped[8:].strip()
-                j = i
-                # 複数行にまたがる定義を収集
-                while j < len(lines) and j == i or (lines[j].strip() and 
-                                                   not lines[j].strip().upper().startswith(("COURSE:", "LEVEL:", "#START", "#END", 
-                                                                                           "TITLE:", "BPM:", "WAVE:", "OFFSET:"))):
-                    if j > i and lines[j-1].strip().endswith(','):
-                        balloon_line += lines[j].strip()
-                    elif j > i:
-                        break
-                    j += 1
-                
-                # 数値部分を抽出
-                numbers = [v.strip() for v in balloon_line.split(",") if v.strip().isdigit()]
-                balloon_defined = len(numbers)
-                
-                # 数値の妥当性チェック
-                for num_str in numbers:
-                    num = int(num_str)
-                    if num <= 0:
-                        errors.append((i, "警告", f"BALLOON値({num})は正の数であるべきです"))
-                
-                if current_course:
-                    course_balloon_defs[current_course] = course_balloon_defs.get(current_course, 0) + balloon_defined
-                else:
-                    errors.append((i, "警告", "COURSE定義より前にBALLOONが定義されています"))
-        
-        # 14. #START/#END の数の一致チェック
-        if start_count != end_count:
-            errors.append((0, "エラー", f"#START({start_count}個) と #END({end_count}個) の数が一致しません"))
-        
-        # 15. COURSE/LEVEL/BPM/WAVE 未定義チェック
-        if not has_course:
-            errors.append((0, "警告", "COURSE: が定義されていません"))
-        if not has_level:
-            errors.append((0, "警告", "LEVEL: が定義されていません"))
-        if not has_bpm:
-            errors.append((0, "警告", "BPM: が定義されていません"))
-        if not has_wave:
-            errors.append((0, "警告", "WAVE: が定義されていません"))
-        
-        # 16. コースごとの風船チェック
-        for course in set(list(course_balloons.keys()) + list(course_balloon_defs.keys())):
-            balloon_start = course_balloons.get(course, 0)
-            balloon_end = course_balloon_ends.get(course, 0)
-            balloon_defined = course_balloon_defs.get(course, 0)
-            
-            # 開始と終了の数が一致するか
-            if balloon_start != balloon_end:
-                errors.append((0, "エラー", f"[{course}] 風船の開始({balloon_start}個)と終了({balloon_end}個)の数が一致しません"))
-            
-            # BALLOON定義との一致チェック
-            if balloon_start > 0 and balloon_defined == 0:
-                errors.append((0, "警告", f"[{course}] 風船が{balloon_start}個ありますが、BALLOON: が定義されていません"))
-            elif balloon_start != balloon_defined and balloon_defined > 0:
-                errors.append((0, "警告", f"[{course}] 風船の個数({balloon_start}個) と BALLOON: の定義数({balloon_defined}個) が一致しません"))
-            
-            # #MEASURE定義チェック
-            if not course_has_measure.get(course, False):
-                errors.append((0, "警告", f"[{course}] #MEASURE が定義されていません（例: #MEASURE 4/4）"))
-            
-            # BPM値のチェック
-            bpm_values = course_bpm_values.get(course, [])
-            if len(bpm_values) > 0:
-                # BPM変化の急激さをチェック
-                for j in range(1, len(bpm_values)):
-                    ratio = max(bpm_values[j], bpm_values[j-1]) / min(bpm_values[j], bpm_values[j-1])
-                    if ratio > 2.0:  # BPMが2倍以上変化
-                        errors.append((0, "警告", f"[{course}] BPMの変化が急激です ({bpm_values[j-1]} → {bpm_values[j]})"))
-        
-        # 17. カンマの連続チェック
-        for i, line in enumerate(lines, 1):
-            if ",," in line:
-                errors.append((i, "警告", "カンマが連続しています（空の小節）"))
-            # 行末の不要なカンマチェック
-            if line.rstrip().endswith(',') and i < len(lines):
-                next_line = lines[i].strip()
-                if next_line and not next_line.startswith(('#', '//', ';')):
-                    errors.append((i, "警告", "行末に余分なカンマがあります（次の行と結合される可能性）"))
-        
-        # 18. 不完全な風船があるかチェック
-        if balloon_stack:
-            for line_num in balloon_stack:
-                errors.append((line_num, "エラー", "風船が開始されましたが終了していません"))
-        
-        # 19. 分岐が閉じられていないかチェック
-        if in_branch:
-            errors.append((branch_start_line, "エラー", "#BRANCHSTART が閉じられていません"))
-        
-        # 20. OFFSET値のチェック
-        offset_line = None
-        for i, line in enumerate(lines, 1):
-            if line.strip().upper().startswith("OFFSET:"):
-                offset_line = i
-                try:
-                    offset_val = float(line.strip()[7:].strip())
-                    if abs(offset_val) > 5.0:
-                        errors.append((i, "警告", f"OFFSET値({offset_val})が大きすぎます（通常は-2.0〜2.0の範囲）"))
-                except:
-                    errors.append((i, "エラー", "OFFSETの値が無効です（数値を指定してください）"))
-                break
-        
-        if offset_line is None:
-            errors.append((0, "警告", "OFFSET: が定義されていません"))
-        
-        # 結果表示
-        if not errors:
-            messagebox.showinfo("エラーチェック", "エラーは見つかりませんでした！\n譜面は正常です。")
-            return
-        
-        # エラーウィンドウを表示
-        self.show_error_window(errors)
-    
-    def show_error_window(self, errors):
-        """エラー一覧ウィンドウを表示"""
-        win = Toplevel(self.root)
-        win.title(f"エラーチェック結果 - {len(errors)}件")
-        win.geometry("800x500")
-        win.transient(self.root)
-        
-        Label(win, text=f"検出されたエラー: {len(errors)}件", 
-              font=("メイリオ", 12, "bold")).pack(pady=10)
-        
-        frame = Frame(win)
-        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        
-        scrollbar = Scrollbar(frame)
-        scrollbar.pack(side="right", fill="y")
-        
-        listbox = Listbox(frame, yscrollcommand=scrollbar.set, 
-                         font=("MS Gothic", 10), selectmode="single")
-        
-        for line_num, error_type, message in errors:
-            if line_num == 0:
-                display = f"[{error_type}] 全体: {message}"
-            else:
-                display = f"[{error_type}] 行{line_num}: {message}"
-            listbox.insert("end", display)
-        
-        listbox.pack(fill="both", expand=True)
-        scrollbar.config(command=listbox.yview)
-        
-        def jump_to_error():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            line_num, error_type, message = errors[sel[0]]
-            if line_num > 0:
-                self.text.see(f"{line_num}.0")
-                self.text.mark_set("insert", f"{line_num}.0")
-                self.text.tag_remove("sel", "1.0", "end")
-                self.text.tag_add("sel", f"{line_num}.0", f"{line_num}.end")
-                win.destroy()
-        
-        listbox.bind("<Double-Button-1>", lambda e: jump_to_error())
-        
-        btn_frame = Frame(win)
-        btn_frame.pack(pady=10)
-        
-        Button(btn_frame, text="該当行にジャンプ", command=jump_to_error, 
-               width=18, font=("メイリオ", 10)).pack(side="left", padx=5)
-        Button(btn_frame, text="閉じる", command=win.destroy, 
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
 
     def open_todo_manager(self):
-        """TODO管理ウィンドウを開く"""
+        """TODO/FIXME管理ウィンドウを開く（改良版）"""
         if hasattr(self, 'todo_window') and self.todo_window and self.todo_window.winfo_exists():
             self.todo_window.lift()
             return
         
-        # TODOコメントを検索
+        # TODO/FIXMEコメントを検索
         todos = self.find_todos()
         
         self.todo_window = Toplevel(self.root)
-        self.todo_window.title(f"TODO管理 - {len(todos)}件")
-        self.todo_window.geometry("800x500")
+        self.todo_window.title(f"TODO/FIXME管理 - {len(todos)}件")
+        self.todo_window.geometry("700x500")
         self.todo_window.transient(self.root)
         
-        # 説明
-        info_frame = Frame(self.todo_window)
-        info_frame.pack(fill="x", padx=10, pady=10)
+        # 上部フレーム：挿入ボタン
+        insert_frame = Frame(self.todo_window, pady=10)
+        insert_frame.pack(fill="x", padx=10)
         
-        Label(info_frame, text="譜面内のTODO/FIXMEコメントを管理", 
-              font=("メイリオ", 12, "bold")).pack(anchor="w")
-        Label(info_frame, text="例: ; TODO: ここの密度を下げる  または  // FIXME: ゴーゴー位置修正", 
-              font=("メイリオ", 9), fg="gray").pack(anchor="w")
+        Label(insert_frame, text="カーソル位置に挿入:", 
+              font=("メイリオ", 10, "bold")).pack(side="left", padx=(0, 10))
         
-        # TODOリスト
+        # TODO挿入ボタン
+        todo_btn = Button(insert_frame, text="TODOを挿入", 
+                         command=lambda: self.insert_todo_fixme("TODO"),
+                         width=12, font=("メイリオ", 10),
+                         bg="#FFD700", fg="black")
+        todo_btn.pack(side="left", padx=5)
+        
+        # FIXME挿入ボタン
+        fixme_btn = Button(insert_frame, text="FIXMEを挿入", 
+                          command=lambda: self.insert_todo_fixme("FIXME"),
+                          width=12, font=("メイリオ", 10),
+                          bg="#FF6B6B", fg="white")
+        fixme_btn.pack(side="left", padx=5)
+        
+        # 説明ラベル
+        Label(self.todo_window, text="例: ; TODO: ここの密度を下げる  または  // FIXME: ゴーゴー位置修正", 
+              font=("メイリオ", 9), fg="gray").pack(pady=(0, 10))
+        
+        # リストフレーム
         list_frame = Frame(self.todo_window)
         list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         
@@ -2433,10 +2772,14 @@ class TJAEditor:
         
         if todos:
             for line_num, todo_type, message in todos:
-                display = f"行{line_num}: [{todo_type}] {message}"
+                # タイプに応じて色分け表示
+                if todo_type == "TODO":
+                    display = f"行{line_num}: [TODO] {message}"
+                else:  # FIXME
+                    display = f"行{line_num}: [FIXME] {message}"
                 self.todo_listbox.insert("end", display)
         else:
-            self.todo_listbox.insert("end", "(TODOコメントはありません)")
+            self.todo_listbox.insert("end", "(TODO/FIXMEコメントはありません)")
         
         self.todo_listbox.pack(fill="both", expand=True)
         scrollbar.config(command=self.todo_listbox.yview)
@@ -2447,18 +2790,45 @@ class TJAEditor:
         # ダブルクリックでジャンプ
         self.todo_listbox.bind("<Double-Button-1>", lambda e: self.jump_to_todo())
         
-        # ボタンフレーム
+        # 下部ボタンフレーム
         btn_frame = Frame(self.todo_window)
         btn_frame.pack(pady=10)
         
-        Button(btn_frame, text="該当行にジャンプ", command=self.jump_to_todo, 
+        Button(btn_frame, text="選択した行にジャンプ", command=self.jump_to_todo, 
                width=18, font=("メイリオ", 10)).pack(side="left", padx=5)
-        Button(btn_frame, text="TODO挿入", command=self.insert_todo_comment, 
-               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
-        Button(btn_frame, text="更新", command=self.refresh_todos, 
+        Button(btn_frame, text="リストを更新", command=self.refresh_todos, 
                width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
         Button(btn_frame, text="閉じる", command=self.todo_window.destroy, 
                width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
+    
+    def insert_todo_fixme(self, todo_type):
+        """カーソル位置にTODOまたはFIXMEコメントを挿入（// 記号統一版）"""
+        default_text = ""
+        if todo_type == "TODO":
+            default_text = "ここを修正する"
+            prompt = "TODOコメントの内容を入力してください:"
+        else:  # FIXME
+            default_text = "バグを修正する"
+            prompt = "FIXMEコメントの内容を入力してください:"
+        
+        todo_text = simpledialog.askstring(
+            f"{todo_type}挿入",
+            prompt,
+            initialvalue=default_text,
+            parent=self.todo_window if hasattr(self, 'todo_window') and self.todo_window.winfo_exists() else self.root
+        )
+        
+        if todo_text:
+            # // 記号に統一
+            comment = f"// {todo_type}: {todo_text}\n"
+            self.text.insert(tk.INSERT, comment)
+            self.text.see(tk.INSERT)
+            # 即時にハイライトを適用
+            self.root.after(10, self.apply_syntax_highlighting)
+            
+            # TODOリストを更新
+            if hasattr(self, 'todo_window') and self.todo_window.winfo_exists():
+                self.refresh_todos()
     
     def find_todos(self):
         """譜面内のTODO/FIXMEコメントを検索"""
@@ -2570,7 +2940,10 @@ class TJAEditor:
         messagebox.showinfo("このエディタについて", about_text)
         
     def apply_syntax_highlighting(self):
-        """構文ハイライトを適用"""
+        """構文ハイライトを適用（カーソル位置を保持する版）"""
+        # 現在のカーソル位置を正確に保存
+        current_cursor = self.text.index(tk.INSERT)
+        
         # 既存のタグを削除
         for tag in ["header", "comment", "command", "error", "todo", "number"]:
             self.text.tag_remove(tag, "1.0", "end")
@@ -2611,21 +2984,20 @@ class TJAEditor:
                     header_end = f"{i}.{colon_pos}"
                     self.text.tag_add("header", line_start, header_end)
             
-                    # 数値部分をハイライト（単体数値＋カンマ区切りの複数数値に対応）
-                value_part = line[colon_pos + 1:].strip()
-                
-                # 単一数値 → 120, -1.25 など
-                is_single_num = re.fullmatch(r"[0-9.\-]+", value_part)
-                
-                # カンマ区切り複数 → 5,10,15 など
-                is_multi_num = re.fullmatch(r"[0-9.\-]+(,[0-9.\-]+)+", value_part)
-                
-                if value_part and (is_single_num or is_multi_num):
-                    value_start = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part)}"
-                    value_end = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part) + len(value_part)}"
-                    self.text.tag_add("number", value_start, value_end)
-
-
+                    # 数値部分をハイライト
+                    value_part = line[colon_pos + 1:].strip()
+                    
+                    # 単一数値 → 120, -1.25 など
+                    import re
+                    is_single_num = re.fullmatch(r"[0-9.\-]+", value_part)
+                    
+                    # カンマ区切り複数 → 5,10,15 など
+                    is_multi_num = re.fullmatch(r"[0-9.\-]+(,[0-9.\-]+)+", value_part)
+                    
+                    if value_part and (is_single_num or is_multi_num):
+                        value_start = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part)}"
+                        value_end = f"{i}.{colon_pos + 1 + line[colon_pos+1:].index(value_part) + len(value_part)}"
+                        self.text.tag_add("number", value_start, value_end)
             
             # 4. 行内コメントの処理（譜面行の後ろのコメント）
             if "//" in line or ";" in line:
@@ -2641,12 +3013,15 @@ class TJAEditor:
                         else:
                             self.text.tag_add("comment", comment_start, line_end)
                         break
-    
-    def on_text_change(self, event=None):
-        """テキスト変更時に構文ハイライトを更新"""
-        # 変更があった行のみを更新（パフォーマンス向上）
-        self.root.after_idle(self.apply_syntax_highlighting)
-            
+        
+        # カーソル位置に戻す（確実に）
+        if current_cursor:
+            try:
+                self.text.mark_set(tk.INSERT, current_cursor)
+                self.text.see(tk.INSERT)
+            except Exception:
+                pass
+                
     def open_file(self, path=None):
         """ファイルを開く（recent_filesの重複防止・即時保存・メニュー更新を完全対応）"""
         if path is None:
@@ -2660,6 +3035,7 @@ class TJAEditor:
     
         path = os.path.abspath(path)
         self.last_folder = os.path.dirname(path)
+        self.save_config()
     
         try:
             # 文字エンコーディング自動判定
@@ -2673,8 +3049,16 @@ class TJAEditor:
             self.text.delete("1.0", tk.END)
             self.text.insert("1.0", content)
             self.text.edit_modified(False)
-    
+            
+            # 変更状態をリセット
+            self._unsaved_changes = False
             self.current_file = path
+            self.current_encoding = encoding
+            
+            # ハッシュを初期化
+            import hashlib
+            self._text_content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+            
             self.update_title()
             self.update_all()
     
@@ -2691,7 +3075,6 @@ class TJAEditor:
             
             # 構文ハイライトを適用
             self.apply_syntax_highlighting()
-            # self.update_breadcrumb()  # ← 削除
     
         except Exception as e:
             messagebox.showerror("エラー", f"ファイルを開けませんでした:\n{e}")
@@ -2714,6 +3097,15 @@ class TJAEditor:
                     f.write(content.rstrip() + "\n")
     
                 self.text.edit_modified(False)
+                
+                # 変更状態をリセット
+                self._unsaved_changes = False
+                
+                # ハッシュを更新
+                import hashlib
+                self._text_content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                
+                self.update_title()
                 messagebox.showinfo("保存完了", "上書き保存しました♪\n自動バックアップも作成済みです")
                 self.update_all()
             except Exception as e:
@@ -2747,29 +3139,26 @@ class TJAEditor:
         
         if file_path:
             self.last_folder = os.path.dirname(file_path)
+            self.save_config()
             try:
                 content = self.text.get("1.0", tk.END)
                 
                 # ★ 常にバックアップフォルダを作成しておく（新規保存時も含む）
                 backup_dir = os.path.join(os.path.dirname(file_path), ".backup")
                 os.makedirs(backup_dir, exist_ok=True)
-                print(f"[DEBUG] バックアップフォルダを確保: {backup_dir}")
                 
                 # ★ タイムスタンプ付き自動バックアップ（既存ファイルがある場合のみ）
                 if os.path.exists(file_path):
-                    print(f"[DEBUG] 既存ファイルを検出: {file_path}")
                     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
                     backup_name = f"{ts}_{os.path.basename(file_path)}"
                     backup_path = os.path.join(backup_dir, backup_name)
                     
                     try:
                         shutil.copy2(file_path, backup_path)
-                        print(f"[DEBUG] バックアップ作成成功: {backup_path}")
                         
                         # 従来の ~ バックアップも残す（オプション）
                         backup = file_path + "~"
                         shutil.copy2(file_path, backup)
-                        print(f"[DEBUG] 簡易バックアップも作成: {backup}")
                     except Exception as backup_error:
                         print(f"[DEBUG] バックアップ作成失敗: {backup_error}")
                 
@@ -2779,6 +3168,14 @@ class TJAEditor:
                 
                 self.current_file = file_path
                 self.text.edit_modified(False)
+                
+                # 変更状態をリセット
+                self._unsaved_changes = False
+                
+                # ハッシュを更新
+                import hashlib
+                self._text_content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+                
                 self.update_all()
                 
                 # 成功メッセージ
@@ -2800,203 +3197,10 @@ class TJAEditor:
                 self.recent_files.insert(0, file_path)
                 self.recent_files = self.recent_files[:self.MAX_RECENT]
                 self.update_recent_menu()
+                self.save_config()
                 
             except Exception as e:
                 messagebox.showerror("保存エラー", f"保存に失敗しました…\n{e}")
-
-    def open_command_palette(self):
-        """コマンドパレットを開く（VSCode風）"""
-        if hasattr(self, 'palette_window') and self.palette_window and self.palette_window.winfo_exists():
-            self.palette_window.lift()
-            self.palette_entry.focus_set()
-            return
-        
-        self.palette_window = Toplevel(self.root)
-        self.palette_window.title("コマンドパレット")
-        self.palette_window.geometry("700x450")
-        self.palette_window.transient(self.root)
-        
-        # ウィンドウを中央に配置
-        self.palette_window.update_idletasks()
-        x = (self.palette_window.winfo_screenwidth() // 2) - (700 // 2)
-        y = (self.palette_window.winfo_screenheight() // 2) - (450 // 2)
-        self.palette_window.geometry(f"+{x}+{y}")
-        
-        # 検索バー
-        search_frame = Frame(self.palette_window, bg="#f0f0f0", height=60)
-        search_frame.pack(fill="x")
-        search_frame.pack_propagate(False)
-        
-        Label(search_frame, text="🔍", font=("メイリオ", 16), bg="#f0f0f0").pack(side="left", padx=10)
-        
-        self.palette_entry = Entry(search_frame, font=("メイリオ", 12), relief="flat")
-        self.palette_entry.pack(side="left", fill="both", expand=True, padx=(0, 10), pady=15)
-        self.palette_entry.focus_set()
-        
-        # コマンドリスト
-        list_frame = Frame(self.palette_window)
-        list_frame.pack(fill="both", expand=True)
-        
-        scrollbar = Scrollbar(list_frame)
-        scrollbar.pack(side="right", fill="y")
-        
-        self.palette_listbox = Listbox(list_frame, yscrollcommand=scrollbar.set,
-                                       font=("メイリオ", 10), activestyle="none",
-                                       selectmode="single", relief="flat")
-        self.palette_listbox.pack(fill="both", expand=True)
-        scrollbar.config(command=self.palette_listbox.yview)
-        
-        # 利用可能なコマンド一覧
-        self.commands = [
-            # ファイル操作
-            ("ファイルを開く", "Ctrl+O", self.open_file),
-            ("上書き保存", "Ctrl+S", self.save_file),
-            ("名前を付けて保存", "Ctrl+Shift+S", self.save_as_file),
-            
-            # 編集
-            ("検索", "Ctrl+F", self.open_search),
-            ("TODO管理", "Ctrl+T", self.open_todo_manager),
-            
-            # 表示
-            ("ダークモード切り替え", "Ctrl+D", self.toggle_dark_mode),
-            ("フォント設定", "", self.open_font_settings),
-            
-            # ヘッダー挿入
-            ("TITLE挿入", "", lambda: self.insert_with_input("TITLE:", "曲名を入力")),
-            ("SUBTITLE挿入", "", lambda: self.insert_with_input("SUBTITLE:", "サブタイトルを入力")),
-            ("BPM挿入", "", lambda: self.insert_with_input("BPM:", "BPMを入力", "120")),
-            ("LEVEL挿入", "", lambda: self.insert_with_input("LEVEL:", "レベル (1-10)", "7")),
-            ("OFFSET挿入", "", lambda: self.insert_with_input("OFFSET:", "オフセット(秒)", "0")),
-            ("WAVE挿入(BPM自動取得)", "", self.insert_wave_with_bpm),
-            
-            # 譜面コマンド
-            ("#START挿入", "", lambda: self.insert_syntax("#START\n")),
-            ("#END挿入", "", lambda: self.insert_syntax("#END\n")),
-            ("#GOGOSTART挿入", "", lambda: self.insert_syntax("#GOGOSTART\n")),
-            ("#GOGOEND挿入", "", lambda: self.insert_syntax("#GOGOEND\n")),
-            ("#BPMCHANGE挿入", "", lambda: self.insert_with_input("#BPMCHANGE ", "新しいBPM", "120")),
-            ("#SCROLL挿入", "", lambda: self.insert_with_input("#SCROLL ", "スクロール速度", "1.0")),
-            
-            # ツール
-            ("エラーチェック", "Ctrl+Shift+E", self.check_errors),
-            ("BPMカウンター", "", self.open_bpm_counter),
-            ("OFFSET一括調整", "", self.open_offset_adjuster),
-            ("AI添削", "", self.ai_autoreview),
-            ("配布用ZIP作成", "Ctrl+E", self.create_distribution_zip),
-            ("バックアップ比較", "", self.open_backup_compare),
-            ("バックアップ履歴", "", self.show_backup_history),
-            ("バックアップフォルダを開く", "", self.open_backup_folder),
-            
-            # プレビュー
-            ("太鼓さん次郎でプレビュー", "F5", self.preview_play),
-            ("太鼓さん次郎のパス設定", "", self.reset_taikojiro_path),
-            
-            # 段位道場
-            ("段位道場設定", "", self.open_dan_window),
-        ]
-        
-        # 初期表示
-        self.update_command_list("")
-        
-        # イベントバインド
-        self.palette_entry.bind("<KeyRelease>", self.on_palette_search)
-        self.palette_entry.bind("<Return>", lambda e: self.execute_selected_command())
-        self.palette_entry.bind("<Down>", lambda e: self.move_selection(1))
-        self.palette_entry.bind("<Up>", lambda e: self.move_selection(-1))
-        self.palette_entry.bind("<Escape>", lambda e: self.palette_window.destroy())
-        
-        self.palette_listbox.bind("<Double-Button-1>", lambda e: self.execute_selected_command())
-        self.palette_listbox.bind("<Return>", lambda e: self.execute_selected_command())
-        
-        # 最初の項目を選択
-        if self.palette_listbox.size() > 0:
-            self.palette_listbox.selection_set(0)
-            self.palette_listbox.activate(0)
-    
-    def on_palette_search(self, event):
-        """検索ボックスの入力時"""
-        query = self.palette_entry.get()
-        self.update_command_list(query)
-    
-    def update_command_list(self, query):
-        """コマンドリストを更新（曖昧検索対応）"""
-        self.palette_listbox.delete(0, tk.END)
-        
-        query_lower = query.lower()
-        
-        # 曖昧検索: クエリの各文字が順番に含まれているかチェック
-        for name, shortcut, func in self.commands:
-            name_lower = name.lower()
-            
-            # 完全一致または部分一致
-            if query_lower in name_lower:
-                display = f"{name}"
-                if shortcut:
-                    display += f"  ({shortcut})"
-                self.palette_listbox.insert("end", display)
-            # 曖昧検索（各文字が順番に含まれる）
-            elif self.fuzzy_match(query_lower, name_lower):
-                display = f"{name}"
-                if shortcut:
-                    display += f"  ({shortcut})"
-                self.palette_listbox.insert("end", display)
-        
-        # 結果がない場合
-        if self.palette_listbox.size() == 0:
-            self.palette_listbox.insert("end", "(該当するコマンドがありません)")
-        else:
-            self.palette_listbox.selection_set(0)
-            self.palette_listbox.activate(0)
-    
-    def fuzzy_match(self, query, text):
-        """曖昧検索マッチング"""
-        query_idx = 0
-        for char in text:
-            if query_idx < len(query) and char == query[query_idx]:
-                query_idx += 1
-        return query_idx == len(query)
-    
-    def move_selection(self, delta):
-        """選択を上下に移動"""
-        current = self.palette_listbox.curselection()
-        if not current:
-            return "break"
-        
-        current_idx = current[0]
-        new_idx = current_idx + delta
-        
-        if 0 <= new_idx < self.palette_listbox.size():
-            self.palette_listbox.selection_clear(0, tk.END)
-            self.palette_listbox.selection_set(new_idx)
-            self.palette_listbox.activate(new_idx)
-            self.palette_listbox.see(new_idx)
-        
-        return "break"
-    
-    def execute_selected_command(self):
-        """選択したコマンドを実行"""
-        selection = self.palette_listbox.curselection()
-        if not selection:
-            return
-        
-        selected_text = self.palette_listbox.get(selection[0])
-        
-        # "(該当するコマンドがありません)" の場合は何もしない
-        if selected_text.startswith("("):
-            return
-        
-        # コマンド名を抽出（ショートカット部分を除去）
-        command_name = selected_text.split("  (")[0]
-        
-        # 該当するコマンドを実行
-        for name, shortcut, func in self.commands:
-            if name == command_name:
-                self.palette_window.destroy()
-                try:
-                    func()
-                except Exception as e:
-                    messagebox.showerror("エラー", f"コマンドの実行に失敗しました。\n{e}")
-                break
 
     def show_backup_history(self):
         """バックアップ履歴を見やすく表示して復元可能にする"""
@@ -3246,12 +3450,177 @@ class TJAEditor:
         self.text.tag_add(tk.SEL, pos, end)
         self.text.mark_set(tk.INSERT, end)
 
+    def check_errors_simple(self):
+        """簡易版エラーチェック（致命的なエラーのみ）"""
+        content = self.text.get("1.0", tk.END)
+        if not content.strip():
+            messagebox.showinfo("エラーチェック", "譜面が空です。")
+            return
+        
+        lines = content.splitlines()
+        errors = []
+        
+        # 1. #START/#END の対応チェック（基本）
+        start_count = 0
+        end_count = 0
+        in_chart = False
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            upper = stripped.upper()
+            
+            if upper in ["#START", "#P1START", "#P2START"]:
+                if in_chart:
+                    errors.append((i, "エラー", "#START が閉じられていません（二重開始）"))
+                start_count += 1
+                in_chart = True
+            elif upper in ["#END", "#P1END", "#P2END"]:
+                if not in_chart:
+                    errors.append((i, "エラー", "#END に対応する #START がありません"))
+                end_count += 1
+                in_chart = False
+        
+        # START/ENDの数の一致チェック
+        if start_count != end_count:
+            errors.append((0, "エラー", f"#START({start_count}個) と #END({end_count}個) の数が一致しません"))
+        
+        # 2. 必須ヘッダーのチェック
+        has_course = False
+        has_level = False
+        has_bpm = False
+        has_wave = False
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip().upper()
+            
+            if stripped.startswith("COURSE:"):
+                has_course = True
+            elif stripped.startswith("LEVEL:"):
+                has_level = True
+            elif stripped.startswith("BPM:"):
+                has_bpm = True
+            elif stripped.startswith("WAVE:"):
+                has_wave = True
+        
+        if not has_course:
+            errors.append((0, "警告", "COURSE: が定義されていません"))
+        if not has_level:
+            errors.append((0, "警告", "LEVEL: が定義されていません"))
+        if not has_bpm:
+            errors.append((0, "警告", "BPM: が定義されていません"))
+        if not has_wave:
+            errors.append((0, "警告", "WAVE: が定義されていません"))
+        
+        # 3. 全角数字チェック（譜面行のみ）
+        in_chart = False
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            upper = stripped.upper()
+            
+            if upper in ["#START", "#P1START", "#P2START"]:
+                in_chart = True
+            elif upper in ["#END", "#P1END", "#P2END"]:
+                in_chart = False
+            
+            if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
+                # 全角数字チェック
+                if any(c in "０１２３４５６７８９" for c in stripped):
+                    errors.append((i, "エラー", "全角数字が含まれています（半角に修正してください）"))
+        
+        # 4. カンマの連続チェック（空小節）
+        for i, line in enumerate(lines, 1):
+            if ",," in line:
+                errors.append((i, "警告", "カンマが連続しています（空の小節）"))
+        
+        # 結果表示
+        if not errors:
+            messagebox.showinfo("エラーチェック", "致命的なエラーは見つかりませんでした！\n譜面は基本的に問題ありません。")
+            return
+        
+        # エラーウィンドウを表示（簡易版）
+        self.show_simple_error_window(errors)
+    
+    def show_simple_error_window(self, errors):
+        """簡易版エラー表示ウィンドウ"""
+        win = Toplevel(self.root)
+        win.title(f"エラーチェック結果 - {len(errors)}件")
+        win.geometry("600x400")
+        win.transient(self.root)
+        
+        # 重要度でソート（エラー→警告）
+        errors.sort(key=lambda x: 0 if x[1] == "エラー" else 1)
+        
+        Label(win, text=f"検出された問題: {len(errors)}件", 
+              font=("メイリオ", 12, "bold")).pack(pady=10)
+        
+        # 統計表示
+        error_count = sum(1 for e in errors if e[1] == "エラー")
+        warning_count = len(errors) - error_count
+        
+        stats_frame = Frame(win)
+        stats_frame.pack(pady=5)
+        
+        Label(stats_frame, text=f"エラー: {error_count}件", 
+              fg="red", font=("メイリオ", 10, "bold")).pack(side="left", padx=10)
+        Label(stats_frame, text=f"警告: {warning_count}件", 
+              fg="orange", font=("メイリオ", 10)).pack(side="left", padx=10)
+        
+        frame = Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        scrollbar = Scrollbar(frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = Listbox(frame, yscrollcommand=scrollbar.set, 
+                         font=("MS Gothic", 10), selectmode="single")
+        
+        for line_num, error_type, message in errors:
+            if line_num == 0:
+                display = f"[{error_type}] 全体: {message}"
+            else:
+                display = f"[{error_type}] 行{line_num}: {message}"
+            
+            # 色分け挿入（エラーは赤、警告は黒）
+            listbox.insert("end", display)
+            if error_type == "エラー":
+                listbox.itemconfig("end", fg="red")
+        
+        listbox.pack(fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        def jump_to_error():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            index = sel[0]
+            line_num, error_type, message = errors[index]
+            if line_num > 0:
+                self.text.see(f"{line_num}.0")
+                self.text.mark_set("insert", f"{line_num}.0")
+                self.text.tag_remove("sel", "1.0", "end")
+                self.text.tag_add("sel", f"{line_num}.0", f"{line_num}.end")
+                win.destroy()
+        
+        listbox.bind("<Double-Button-1>", lambda e: jump_to_error())
+        
+        btn_frame = Frame(win)
+        btn_frame.pack(pady=10)
+        
+        Button(btn_frame, text="該当行にジャンプ", command=jump_to_error, 
+               width=18, font=("メイリオ", 10)).pack(side="left", padx=5)
+        Button(btn_frame, text="閉じる", command=win.destroy, 
+               width=12, font=("メイリオ", 10)).pack(side="left", padx=5)
+
     def insert_syntax(self, syntax):
+        """構文を挿入（ハイライト更新付き）"""
         self.text.insert(tk.INSERT, syntax)
         self.text.see(tk.INSERT)
+        # 即時にハイライトを適用
+        self.root.after(10, self.apply_syntax_highlighting)
         self.root.after_idle(self.update_all)
 
     def insert_with_input(self, prefix, prompt, default=""):
+        """入力付き挿入（ハイライト更新付き）"""
         val = simpledialog.askstring("入力", prompt, initialvalue=default)
         if val is not None:
             self.insert_syntax(prefix + val + "\n")
@@ -3269,64 +3638,6 @@ class TJAEditor:
 
     def insert_course_only(self, course):
         self.insert_syntax(f"COURSE:{course}\n")
-
-    def insert_wave_with_bpm(self):
-        # librosa がなくても警告が出ない安全なインポートに変更
-        if not LIBROSA_AVAILABLE:
-            # librosa がないときは手動で WAVE と BPM を入力させる（超便利になるよ！）
-            wave_name = simpledialog.askstring("WAVEファイル名", "WAVE: に記入するファイル名を入力してください（例: song.ogg）")
-            if wave_name is None:
-                return
-            if not wave_name.strip():
-                wave_name = "song.ogg"
-
-            bpm_input = simpledialog.askfloat("BPM入力", "BPMを手動で入力してください", minvalue=30, maxvalue=300, initialvalue=140.0)
-            if bpm_input is None:
-                return
-
-            wave_line = f"WAVE:{wave_name.strip()}\n"
-            bpm_line = f"BPM:{bpm_input:.2f}\n"
-
-            self.text.insert(tk.INSERT, wave_line + bpm_line)
-            self.text.see(tk.INSERT)
-            self.root.after_idle(self.update_all)
-            messagebox.showinfo("完了", f"WAVE と BPM を手動で挿入しました！\n\nWAVE:{wave_name.strip()}\nBPM:{bpm_input:.2f}")
-            return
-
-        # ← ここから下は librosa があるときの処理（numba警告が出ないように修正済み）
-        path = filedialog.askopenfilename(
-            title="音声ファイルを選択（OGG/WAV対応）",
-            filetypes=[("音声ファイル", "*.ogg *.wav *.mp3")]
-        )
-        if not path:
-            return
-
-        try:
-            # numbaのFutureWarningを完全に抑える安全な読み込み方
-            import librosa.core as lc
-            y, sr = lc.load(path, sr=None, mono=True)
-            # beat_track の代わりに軽量な onset 検出 + tempo 推定
-            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-            tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
-            bpm = round(float(tempo), 2)
-
-        except Exception as e:
-            # 何か失敗したら手動入力にフォールバック（超親切仕様に！）
-            bpm_input = simpledialog.askfloat(
-                "BPM自動取得失敗",
-                f"音声解析に失敗しました…\n{os.path.basename(path)}\n\n手動でBPMを入力してください",
-                minvalue=30, maxvalue=300, initialvalue=140.0
-            )
-            if bpm_input is None:
-                return
-            bpm = round(bpm_input, 2)
-
-        wave = f"WAVE:{os.path.basename(path)}\n"
-        bpm_line = f"BPM:{bpm}\n"
-        self.text.insert(tk.INSERT, wave + bpm_line)
-        self.text.see(tk.INSERT)
-        self.root.after_idle(self.update_all)
-        messagebox.showinfo("成功", f"{os.path.basename(path)}\nBPM: {bpm} を自動取得＆挿入しました")
 
     def open_dan_window(self):
         if hasattr(self, 'dan_window') and self.dan_window and self.dan_window.winfo_exists():
@@ -4449,6 +4760,52 @@ class TJAEditor:
         except Exception as e:
             messagebox.showerror("保存失敗", f"ファイルの書き込みに失敗しました。\n\n{e}", parent=self.dan_window)
 
+    def new_file(self):
+        """新規ファイルを作成"""
+        # 未保存の変更があるかチェック
+        if self._unsaved_changes:
+            response = messagebox.askyesnocancel(
+                "新規作成",
+                "編集中の内容が保存されていません。\n\n"
+                "「はい」 → 保存して新規作成\n"
+                "「いいえ」 → 保存せずに新規作成\n"
+                "「キャンセル」 → 編集に戻る",
+                icon="warning"
+            )
+            
+            if response is True:  # 「はい」保存して新規作成
+                if self.current_file:
+                    self.save_file()
+                else:
+                    self.save_as_file()
+                    if self.current_file:  # 保存ダイアログでキャンセルされた場合
+                        return
+            elif response is False:  # 「いいえ」保存せず新規作成
+                pass  # そのまま新規作成
+            else:  # 「キャンセル」
+                return
+        
+        # テキストエリアをクリア
+        self.text.delete("1.0", tk.END)
+        
+        # 状態をリセット
+        self.current_file = None
+        self.current_encoding = 'cp932'
+        self._unsaved_changes = False
+        self._text_content_hash = None
+        
+        # タイトルを更新
+        self.update_title()
+        
+        # 構文ハイライトを更新
+        self.apply_syntax_highlighting()
+        
+        # 行番号などを更新
+        self.update_all()
+        
+        # ステータスバーにメッセージ表示
+        self.statusbar.config(text="新規ファイルを作成しました")
+
     def on_closing(self):
         # グローバルバインディング解除
         try:
@@ -4465,11 +4822,66 @@ class TJAEditor:
                 pass
             self.syntax_window = None
         
+        # プレビュー実行中のプロセスを終了
+        if hasattr(self, 'preview_running') and self.preview_running:
+            if hasattr(self, 'preview_process') and self.preview_process:
+                try:
+                    self.preview_process.terminate()
+                    self.preview_process.wait(timeout=1)
+                except:
+                    try:
+                        self.preview_process.kill()
+                    except:
+                        pass
+                finally:
+                    self.preview_running = False
+                    self.preview_process = None
+        
+        # BPMカウンターウィンドウを閉じる
+        if hasattr(self, 'bpm_window') and self.bpm_window:
+            try:
+                self.bpm_window.destroy()
+            except:
+                pass
+            self.bpm_window = None
+        
+        # 段位道場ウィンドウを閉じる
+        if hasattr(self, 'dan_window') and self.dan_window:
+            try:
+                self.dan_window.destroy()
+            except:
+                pass
+            self.dan_window = None
+        
+        # TODO管理ウィンドウを閉じる
+        if hasattr(self, 'todo_window') and self.todo_window:
+            try:
+                self.todo_window.destroy()
+            except:
+                pass
+            self.todo_window = None
+        
+        # OFFSET調整ウィンドウを閉じる
+        if hasattr(self, 'offset_window') and self.offset_window:
+            try:
+                self.offset_window.destroy()
+            except:
+                pass
+            self.offset_window = None
+        
+        # 検索ウィンドウを閉じる
+        if hasattr(self, 'search_window') and self.search_window:
+            try:
+                self.search_window.destroy()
+            except:
+                pass
+            self.search_window = None
+        
         # 設定保存
         self.save_config()
         
-        # 変更があるかチェック
-        if self.text.edit_modified():
+        # 変更があるかチェック - 改善版
+        if self._unsaved_changes:
             response = messagebox.askyesnocancel(
                 "変更を保存しますか?",
                 "編集中の内容が保存されていません。\n\n"
@@ -4478,18 +4890,34 @@ class TJAEditor:
                 "「キャンセル」 → 編集に戻る",
                 icon="warning"
             )
-            if response is True:
+            
+            if response is True:  # 「はい」保存して終了
                 if self.current_file:
-                    self.save_file()
+                    try:
+                        self.save_file()
+                    except Exception as e:
+                        messagebox.showerror("保存エラー", f"保存に失敗しました:\n{e}")
+                        return  # エラー時は終了しない
                 else:
-                    self.save_as_file()
+                    # 名前を付けて保存
+                    try:
+                        self.save_as_file()
+                    except Exception as e:
+                        messagebox.showerror("保存エラー", f"保存に失敗しました:\n{e}")
+                        return  # エラー時は終了しない
+                
                 self.root.destroy()
-            elif response is False:
+                
+            elif response is False:  # 「いいえ」保存せず終了
                 self.root.destroy()
-        else:
+                
+            else:  # 「キャンセル」またはウィンドウを閉じた
+                return  # 終了しない
+            
+        else:  # 変更なし
             if messagebox.askokcancel("終了", "TJA Editorを終了しますか?"):
                 self.root.destroy()
-
+            
 if __name__ == "__main__":
     root = tk.Tk()
     app = TJAEditor(root)
