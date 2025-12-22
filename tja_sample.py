@@ -23,7 +23,7 @@ class TJAEditor:
         ("魂ゲージ", "～以上", "98", "100"),
         ("良の数", "～以上", "0", "0"),
         ("不可の数", "～未満", "0", "0"),
-        ("スコア", "～以上", "0", "0")
+        ("連打数", "～以上", "0", "0")
     ]
     def get_config_path(self):
            """exe化された環境でも正しくconfigファイルのパスを取得"""
@@ -148,6 +148,10 @@ class TJAEditor:
         for course in ["Easy", "Normal", "Hard", "Oni", "Edit"]:
             coursemenu.add_command(label=course, command=lambda c=course: self.insert_course_only(c))
         headermenu.add_cascade(label="COURSE:", menu=coursemenu)
+        stylemenu = tk.Menu(headermenu, tearoff=0)
+        for style in ["Single","Double"]:
+            stylemenu.add_command(label=style,command=lambda s=style: self.insert_style_only(s))
+        headermenu.add_cascade(label="STYLE:", menu=stylemenu)
         headermenu.add_command(label="LEVEL:", command=lambda: self.insert_with_input("LEVEL:", "レベル (1-10)", "7"))
         headermenu.add_command(label="BALLOON:", command=lambda: self.insert_with_input("BALLOON:", "風船音符"))
         headermenu.add_command(label="SCOREINIT:", command=lambda: self.insert_with_input("SCOREINIT:", "初期スコア", "1000"))
@@ -157,6 +161,8 @@ class TJAEditor:
         notemenu = tk.Menu(menubar, tearoff=0)
         measuremenu = tk.Menu(notemenu, tearoff=0)
         measuremenu.add_command(label="#START", command=lambda: self.insert_syntax("#START\n"))
+        measuremenu.add_command(label="#START P1", command=lambda: self.insert_syntax("#START P1\n"))
+        measuremenu.add_command(label="#START P2", command=lambda: self.insert_syntax("#START P2\n"))
         measuremenu.add_command(label="#END", command=lambda: self.insert_syntax("#END\n"))
         measuremenu.add_command(label="#MEASURE 4/4", command=self.insert_measure)
         notemenu.add_cascade(label="小節・開始/終了", menu=measuremenu)
@@ -175,14 +181,6 @@ class TJAEditor:
         notemenu.add_command(label="#N", command=lambda: self.insert_syntax("#N\n"))
         notemenu.add_command(label="#E", command=lambda: self.insert_syntax("#E\n"))
         notemenu.add_command(label="#M", command=lambda: self.insert_syntax("#M\n"))
-        p1menu = tk.Menu(notemenu, tearoff=0)
-        p1menu.add_command(label="#P1START", command=lambda: self.insert_syntax("#P1START\n"))
-        p1menu.add_command(label="#P1END", command=lambda: self.insert_syntax("#P1END\n"))
-        notemenu.add_cascade(label="P1譜面", menu=p1menu)
-        p2menu = tk.Menu(notemenu, tearoff=0)
-        p2menu.add_command(label="#P2START", command=lambda: self.insert_syntax("#P2START\n"))
-        p2menu.add_command(label="#P2END", command=lambda: self.insert_syntax("#P2END\n"))
-        notemenu.add_cascade(label="P2譜面", menu=p2menu)
         menubar.add_cascade(label="譜面コマンド", menu=notemenu)
     
         dojomenu = tk.Menu(menubar, tearoff=0)
@@ -517,12 +515,12 @@ class TJAEditor:
             upper = stripped.upper()
             
             # 譜面開始
-            if upper in ["#START", "#P1START", "#P2START"]:
+            if upper in ["#START", "#START P1", "#START P2"]:
                 in_chart = True
                 continue
             
             # 譜面終了
-            if upper in ["#END", "#P1END", "#P2END"]:
+            if upper in "#END":
                 in_chart = False
                 continue
             
@@ -1477,49 +1475,49 @@ class TJAEditor:
         messagebox.showinfo("完了", f"OFFSET を {offset_value} に設定しました！\nF5で確認してください")
         
     def smart_comma_on_enter(self, event=None,Nopreview=None):
-            """Enterキーを押したときに、譜面行の末尾に自動でカンマを付ける"""
-            try:
-                # 現在のカーソル位置
-                cursor_pos = self.text.index("insert")
-                line_start = f"{cursor_pos.split('.')[0]}.0"
-                line_end   = f"{cursor_pos.split('.')[0]}.end"
-                current_line_text = self.text.get(line_start, line_end)
-    
-                # 1. ヘッダー部分(#STARTより前) or #END以降なら何もしない
-                text_before_cursor = self.text.get("1.0", cursor_pos)
-                if "#START" not in text_before_cursor or "#END" in text_before_cursor:
-                    return None  # 標準の改行に任せる
-    
-                # 2. 現在の行が譜面行か判定(1~8のどれかを含むか)
-                stripped = current_line_text.rstrip()
-                if not any(c in "12345678" for c in stripped):
-                    return None  # 譜面じゃない行は普通に改行
-    
-                # 3. #で始まる命令文は自動カンマ挿入しない
-                if stripped.lstrip().startswith("#"):
-                    return None  # 命令文は標準の改行
-    
-                # 4. コメント行(//または;で始まる)は自動カンマ挿入しない
-                if stripped.lstrip().startswith("//") or stripped.lstrip().startswith(";"):
-                    return None  # コメント行は標準の改行
-    
-                # 5. 既にカンマがある or 空行なら何もしない
-                if stripped.endswith(",") or not stripped:
-                    return None
-    
-                # 6. カンマを自動挿入
-                self.text.insert(line_end, ",")
-    
-                # 7. 少し待ってから改行(カンマが見えるようにしてから改行)
-                self.text.after(10, lambda: self.text.insert("insert", "\n"))
-    
-                # 標準のEnter動作はキャンセル
-                return "break"
-    
-            except Exception as e:
-                # 万が一のエラーでもクラッシュしないように
-                print(f"[SmartComma] Error: {e}")
-                return Nopreview
+        """Enterキーを押したときに、譜面行の末尾に自動でカンマを付ける"""
+        try:
+            # 現在のカーソル位置
+            cursor_pos = self.text.index("insert")
+            line_start = f"{cursor_pos.split('.')[0]}.0"
+            line_end   = f"{cursor_pos.split('.')[0]}.end"
+            current_line_text = self.text.get(line_start, line_end)
+
+            # 1. ヘッダー部分(#STARTより前) or #END以降なら何もしない
+            text_before_cursor = self.text.get("1.0", cursor_pos)
+            if "#START" not in text_before_cursor or "#END" in text_before_cursor:
+                return None  # 標準の改行に任せる
+
+            # 2. 現在の行が譜面行か判定(0~8のどれかを含むか)
+            stripped = current_line_text.rstrip()
+            if not any(c in "012345678" for c in stripped):
+                return None  # 譜面じゃない行は普通に改行
+
+            # 3. #で始まる命令文は自動カンマ挿入しない
+            if stripped.lstrip().startswith("#"):
+                return None  # 命令文は標準の改行
+
+            # 4. コメント行(//または;で始まる)は自動カンマ挿入しない
+            if stripped.lstrip().startswith("//") or stripped.lstrip().startswith(";"):
+                return None  # コメント行は標準の改行
+
+            # 5. 既にカンマがある or 空行なら何もしない
+            if stripped.endswith(",") or not stripped:
+                return None
+
+            # 6. カンマを自動挿入
+            self.text.insert(line_end, ",")
+
+            # 7. 少し待ってから改行(カンマが見えるようにしてから改行)
+            self.text.after(10, lambda: self.text.insert("insert", "\n"))
+
+            # 標準のEnter動作はキャンセル
+            return "break"
+
+        except Exception as e:
+            # 万が一のエラーでもクラッシュしないように
+            print(f"[SmartComma] Error: {e}")
+            return Nopreview
     
     def update_recent_menu(self):
         self.recent_menu.delete(0, tk.END)
@@ -1861,9 +1859,9 @@ class TJAEditor:
                 elif current_line.startswith("#"):
                     # #で始まる命令文の場合は命令文を表示（#START/#END系以外）
                     current_line_upper = current_line.upper()
-                    if current_line_upper in ["#START", "#END", "#P1START", "#P2START", "#P1END", "#P2END"]:
+                    if current_line_upper in ["#START", "#END", "#START P1", "#START P2"]:
                         # #START/#END系は特別扱い（譜面開始/終了）
-                        if current_line_upper in ["#START", "#P1START", "#P2START"]:
+                        if current_line_upper in ["#START", "#START P1", "#START P2"]:
                             breadcrumb = [filename, "ヘッダー部分", "譜面開始", f"行 {line_num}"]
                         else:
                             breadcrumb = [filename, "ヘッダー部分", "譜面終了", f"行 {line_num}"]
@@ -1887,14 +1885,14 @@ class TJAEditor:
                     line_text = lines[i]
                     u = line_text.strip().upper()
                     
-                    if u in ["#START", "#P1START", "#P2START"]:
+                    if u in ["#START", "#START P1", "#START P2"]:
                         in_chart = True
                         after_end = False
                         measure_count = 0
                         current_measure_started = False
                         continue
                     
-                    if u in ["#END", "#P1END", "#P2END"]:
+                    if u in "#END":
                         in_chart = False
                         after_end = True
                         continue
@@ -1915,8 +1913,8 @@ class TJAEditor:
                 # ====== 現在行の状態 ======
                 current_line = lines[line_num - 1].strip() if line_num - 1 < len(lines) else ""
                 current_line_upper = current_line.upper()
-                is_start_line = current_line_upper in ["#START", "#P1START", "#P2START"]
-                is_end_line = current_line_upper in ["#END", "#P1END", "#P2END"]
+                is_start_line = current_line_upper in ["#START", "#START P1", "#START P2"]
+                is_end_line = current_line_upper in "#END"
                 
                 current_line_in_measure = False
                 if in_chart and line_num - 1 < end_line:
@@ -1931,7 +1929,7 @@ class TJAEditor:
                     breadcrumb = [filename, f"[{current_course}]", "空行", f"行 {line_num}"]
                 elif current_line.startswith("#"):
                     # #で始まる行の場合
-                    if current_line_upper in ["#START", "#END", "#P1START", "#P2START", "#P1END", "#P2END"]:
+                    if current_line_upper in ["#START", "#END", "#START P1", "#START P2"]:
                         # #START/#END系は特別扱い
                         if is_start_line:
                             breadcrumb = [filename, f"[{current_course}]", "譜面開始", f"行 {line_num}"]
@@ -2222,25 +2220,39 @@ class TJAEditor:
         current_course = None
         header_done = False
     
+        # ===== STYLE 判定（全体から1回だけ）=====
+        is_double = False
+        for line in lines:
+            u = line.strip().upper()
+            if u.startswith("STYLE:"):
+                v = u.split(":", 1)[1].strip()
+                is_double = v in ("DOUBLE", "2")
+                break
+    
+        in_chart = False
+        style_written = False
+    
         for line in lines:
             stripped = line.strip()
     
-            # ===== コメントは完全除外 =====
+            # ===== コメント完全除外 =====
             if stripped.startswith("//") or stripped.startswith(";"):
                 continue
     
             upper = stripped.upper()
     
-            # ===== COURSE検出 =====
+            # ===== COURSE 検出 =====
             if upper.startswith("COURSE:"):
                 current_course = stripped.split(":", 1)[1].strip()
                 in_target = (current_course.lower() == course_name.lower())
                 header_done = True
+                in_chart = False
+    
                 if in_target:
                     course_lines.append(line)
                 continue
     
-            # ===== ヘッダー部 =====
+            # ===== ヘッダー =====
             if not header_done:
                 if upper.startswith((
                     "TITLE:",
@@ -2256,15 +2268,44 @@ class TJAEditor:
                     header_lines.append(line)
                 continue
     
-            # ===== 選択中COURSEの中身 =====
+            # ===== 選択中 COURSE =====
             if in_target:
-                # 行内コメント除去
-                clean = line
-                for c in ("//", ";"):
-                    if c in clean:
-                        clean = clean.split(c, 1)[0].rstrip()
-                if clean:
-                    course_lines.append(clean)
+    
+                # COURSE内 STYLE は必ず保持
+                if upper.startswith("STYLE:"):
+                    course_lines.append(line)
+                    style_written = True
+                    continue
+    
+                # ===== Double =====
+                if is_double:
+                    if upper == "#START P1":
+                        # STYLE が無ければ自動補完
+                        if not style_written:
+                            course_lines.append("STYLE:Double")
+                            style_written = True
+    
+                        in_chart = True
+                        course_lines.append(line)
+                        continue
+    
+                    if not in_chart:
+                        continue
+    
+                    course_lines.append(line)
+    
+                    if upper == "#END":
+                        break
+    
+                # ===== Single =====
+                else:
+                    # 行内コメント除去
+                    clean = line
+                    for c in ("//", ";"):
+                        if c in clean:
+                            clean = clean.split(c, 1)[0].rstrip()
+                    if clean:
+                        course_lines.append(clean)
     
         if not course_lines:
             raise ValueError(f"COURSE '{course_name}' が見つかりません")
@@ -2289,6 +2330,50 @@ class TJAEditor:
                 return line.split(":", 1)[1].strip()
     
         return None
+
+    def is_double_style(self, lines):
+        """
+        STYLE:Double または STYLE:2 かどうか判定
+        """
+        for line in lines:
+            u = line.strip().upper()
+            if u.startswith("STYLE:"):
+                value = u[6:].strip()
+                return value in ("DOUBLE", "2")
+        return False
+
+    def extract_chart_for_preview(self, lines):
+        """
+        STYLE に応じてプレビュー対象の #START～#END を抽出
+        Double の場合は #START P1 ～ #END（P2含む）
+        """
+        is_double = self.is_double_style(lines)
+    
+        start_idx = None
+        end_idx = None
+    
+        for i, line in enumerate(lines):
+            u = line.strip().upper()
+    
+            if is_double:
+                # Double / 2 の場合
+                if u == "#START P1" and start_idx is None:
+                    start_idx = i
+                elif u == "#END" and start_idx is not None:
+                    end_idx = i
+                    break
+            else:
+                # Single の場合（従来通り）
+                if u.startswith("#START"):
+                    start_idx = i
+                elif u == "#END" and start_idx is not None:
+                    end_idx = i
+                    break
+    
+        if start_idx is None or end_idx is None:
+            return None
+    
+        return lines[start_idx:end_idx + 1]
 
     def preview_play(self, event=None):
         """F5キー：通常譜面用プレビュー（段位道場は非対応）"""
@@ -2396,7 +2481,6 @@ class TJAEditor:
             target=cleanup_preview,
             daemon=True
         ).start()
-
 
     def update_linenumbers(self, event=None):
         self.linenumbers.delete("all")
@@ -2675,7 +2759,7 @@ class TJAEditor:
                 current_level = lm.group(1)
     
             # 譜面開始
-            if s in ["#start", "#p1start", "#p2start"]:
+            if s in ["#start", "#start p1", "#start p2"]:
                 if in_chart:
                     results.append((current, don, katsu, don + katsu, current_level))
                     don = katsu = 0
@@ -2683,7 +2767,7 @@ class TJAEditor:
                 continue
     
             # 譜面終了
-            if s in ["#end", "#p1end", "#p2end"]:
+            if s in "#end":
                 if in_chart:
                     results.append((current, don, katsu, don + katsu, current_level))
                     don = katsu = 0
@@ -2974,7 +3058,7 @@ class TJAEditor:
                 headers = [
                     "TITLE", "SUBTITLE", "BPM", "WAVE", "OFFSET", "DEMOSTART",
                     "GENRE", "SCOREMODE", "SCOREINIT", "SCOREDIFF", "COURSE",
-                    "LEVEL", "BALLOON", "SONGVOL", "SEVOL", "MAKER"
+                    "LEVEL", "BALLOON", "SONGVOL", "SEVOL", "MAKER","STYLE"
                 ]
             
                 first_word = stripped.split(":")[0].upper()
@@ -3469,12 +3553,12 @@ class TJAEditor:
             stripped = line.strip()
             upper = stripped.upper()
             
-            if upper in ["#START", "#P1START", "#P2START"]:
+            if upper in ["#START", "#START P1", "#START P2"]:
                 if in_chart:
                     errors.append((i, "エラー", "#START が閉じられていません（二重開始）"))
                 start_count += 1
                 in_chart = True
-            elif upper in ["#END", "#P1END", "#P2END"]:
+            elif upper in "#END":
                 if not in_chart:
                     errors.append((i, "エラー", "#END に対応する #START がありません"))
                 end_count += 1
@@ -3517,9 +3601,9 @@ class TJAEditor:
             stripped = line.strip()
             upper = stripped.upper()
             
-            if upper in ["#START", "#P1START", "#P2START"]:
+            if upper in ["#START", "#START P1", "#START P2"]:
                 in_chart = True
-            elif upper in ["#END", "#P1END", "#P2END"]:
+            elif upper in "#END":
                 in_chart = False
             
             if in_chart and not stripped.startswith("#") and not stripped.startswith("//") and not stripped.startswith(";"):
@@ -3638,6 +3722,9 @@ class TJAEditor:
 
     def insert_course_only(self, course):
         self.insert_syntax(f"COURSE:{course}\n")
+        
+    def insert_style_only(self, style):
+        self.insert_syntax(f"STYLE:{style}\n")
 
     def open_dan_window(self):
         if hasattr(self, 'dan_window') and self.dan_window and self.dan_window.winfo_exists():
@@ -3961,9 +4048,25 @@ class TJAEditor:
         spacer_frame = Frame(cond_inner_frame, height=20, bg="#f0f0f0")
         spacer_frame.pack(fill="x")
         
-        # スクロール領域更新
+       # スクロール領域更新
         cond_inner_frame.bind("<Configure>", 
                              lambda e: cond_canvas.configure(scrollregion=cond_canvas.bbox("all")))
+        
+        # マウスホイールでスクロール可能にする
+        def on_mousewheel(event):
+            cond_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        
+        # Canvasとその子要素にマウスホイールイベントをバインド
+        cond_canvas.bind_all("<MouseWheel>", on_mousewheel)
+        cond_inner_frame.bind_all("<MouseWheel>", on_mousewheel)
+        
+        # ウィンドウが閉じられる時にイベントをアンバインド
+        def cleanup_mousewheel():
+            try:
+                cond_canvas.unbind_all("<MouseWheel>")
+                cond_inner_frame.unbind_all("<MouseWheel>")
+            except:
+                pass
         
         # ========== 生成ボタンフレーム（右フレーム下部に配置）==========
         button_frame = Frame(right_frame, pady=10)
@@ -3985,21 +4088,22 @@ class TJAEditor:
         self.update_add_button()
         
         # ウィンドウ設定 - サイズ固定
-        self.dan_window.minsize(1150, 700)
-        self.dan_window.maxsize(1150, 700)
+        self.dan_window.minsize(1040, 700)
+        self.dan_window.maxsize(1040, 700)
         
         # 初回表示
         self.update_song_settings()
-    
+
     def _close_dan_window(self):
-        # ← マウスホイールバインディング解除
+        """段位道場ウィンドウを閉じる時の処理"""
+        # マウスホイールバインディング解除
         if hasattr(self, 'dan_window') and self.dan_window:
             try:
                 self.dan_window.unbind_all("<MouseWheel>")
             except:
                 pass
         
-        # ← ウィジェット完全破棄
+        # ウィジェット完全破棄
         if hasattr(self, 'per_song_widgets'):
             for item in self.per_song_widgets:
                 for widget_tuple in self.per_song_widgets[item]:
@@ -4010,8 +4114,11 @@ class TJAEditor:
                         except:
                             pass
         
-        if self.dan_window:
-            self.dan_window.destroy()
+        if hasattr(self, 'dan_window') and self.dan_window:
+            try:
+                self.dan_window.destroy()
+            except:
+                pass
             self.dan_window = None
     
         # 不要な曲設定を削除(曲数に合わせて整理)
@@ -4027,6 +4134,313 @@ class TJAEditor:
                 self.update_song_settings()
             except:
                 pass
+        
+    def on_course_changed(self, song_idx, combobox):
+        selected = combobox.get()
+        self.song_courses_temp[song_idx] = selected
+            
+        # コース変更時に GENRE, SCOREINIT, SCOREDIFF を保持
+        current_genre = self.song_genres.get(song_idx, "ナムコオリジナル")
+        current_scoreinit = self.song_scoreinit.get(song_idx, "")
+        current_scorediff = self.song_scorediff.get(song_idx, "")
+        
+        self.update_level_and_genre(song_idx)
+        
+        # コース変更後も手動設定した値を保持
+        self.song_genres[song_idx] = current_genre
+        self.song_scoreinit[song_idx] = current_scoreinit
+        self.song_scorediff[song_idx] = current_scorediff
+        self.update_song_settings()
+    
+    def update_level_and_genre(self, song_idx):
+        if song_idx >= len(self.song_paths):
+            return
+        path = self.song_paths[song_idx]
+        selected_jp = self.song_courses_temp.get(song_idx, "鬼")
+        course_map = {"かんたん":"Easy","ふつう":"Normal","むずかしい":"Hard","鬼":"Oni","裏鬼":"Edit"}
+        target = course_map.get(selected_jp, "Oni")
+        level = "?"
+        
+        # ★ ファイルからSCOREINITとSCOREDIFFを取得
+        scoreinit = ""
+        scorediff = ""
+        
+        try:
+            # 文字エンコーディングの自動判定（BOM付きUTF-8対応）
+            with open(path, "rb") as f:
+                raw = f.read()
+                
+            import chardet
+            encoding_info = chardet.detect(raw)
+            detected_encoding = encoding_info["encoding"] or "shift_jis"
+            
+            if detected_encoding.lower().startswith("utf") and raw.startswith(b"\xef\xbb\xbf"):
+                encoding = "utf-8-sig"
+            else:
+                encoding = detected_encoding
+            
+            content = raw.decode(encoding, errors="replace")
+            
+            lines = content.splitlines()
+            current_course = None
+            in_target_course = False
+            
+            for line in lines:
+                s = line.strip()
+                
+                # COURSE検出
+                m = re.match(r"COURSE:\s*([^\s#;]+)", s, re.I)
+                if m:
+                    c = m.group(1).strip()
+                    if c in ["0","1","2","3","4"]:
+                        c = ["Easy","Normal","Hard","Oni","Edit"][int(c)]
+                    current_course = c.capitalize()
+                    in_target_course = (current_course == target)
+                    continue
+                
+                # 選択されたCOURSE内でのみ値を取得
+                if in_target_course:
+                    # LEVEL取得
+                    lm = re.match(r"LEVEL:\s*(\d+)", s, re.I)
+                    if lm: 
+                        level = lm.group(1)
+                    
+                    # SCOREINIT取得（COURSE内）
+                    si_match = re.match(r"SCOREINIT:\s*(\d+)", s, re.I)
+                    if si_match:
+                        scoreinit = si_match.group(1)
+                    
+                    # SCOREDIFF取得（COURSE内）
+                    sd_match = re.match(r"SCOREDIFF:\s*(\d+)", s, re.I)
+                    if sd_match:
+                        scorediff = sd_match.group(1)
+                
+                # グローバル領域の検索（COURSEブロック外）
+                elif current_course is None:  # COURSEブロックに入る前
+                    # SCOREINIT取得（グローバル）- 既に見つかっていない場合のみ
+                    if not scoreinit:
+                        si_match = re.match(r"SCOREINIT:\s*(\d+)", s, re.I)
+                        if si_match:
+                            scoreinit = si_match.group(1)
+                    
+                    # SCOREDIFF取得（グローバル）- 既に見つかっていない場合のみ
+                    if not scorediff:
+                        sd_match = re.match(r"SCOREDIFF:\s*(\d+)", s, re.I)
+                        if sd_match:
+                            scorediff = sd_match.group(1)
+                        
+        except Exception as e:
+            print(f"ファイル読み込みエラー: {e}")
+        
+        # ★ シンプルに更新（常にファイルの値を使用）
+        self.song_levels[song_idx] = level
+        self.song_scoreinit[song_idx] = scoreinit
+        self.song_scorediff[song_idx] = scorediff
+        
+        # GENREは変更されていない場合のみ設定
+        if song_idx not in self.song_genres:
+            self.song_genres[song_idx] = "ナムコオリジナル"
+        
+        # UIを更新
+        self.update_song_settings()
+    
+    def update_song_settings(self):
+        if not hasattr(self, 'song_listbox') or not self.song_listbox.winfo_exists():
+            return
+        
+        self.song_listbox.delete(0, tk.END)
+        if self.song_paths:
+            for i, path in enumerate(self.song_paths):
+                # ファイル名を短く表示
+                fname = os.path.basename(path)
+                if len(fname) > 25:
+                    fname = fname[:22] + "..."
+                self.song_listbox.insert(tk.END, f"{i+1}. {fname}")
+        else:
+            self.song_listbox.insert(tk.END, "（曲を追加してください）")
+        
+        # フレームは必ず最初から作成
+        if not hasattr(self, 'song_settings_frame') or not self.song_settings_frame.winfo_exists():
+            container = self.dan_window.winfo_children()[0].winfo_children()[0]
+            self.song_settings_frame = LabelFrame(container, text="■ 各曲の設定 ■", 
+                                                font=("メイリオ", 11, "bold"), padx=8, pady=8)
+            self.song_settings_frame.pack(fill=tk.X, pady=(8, 0), before=self.gen_btn)
+        
+        for w in self.song_settings_frame.winfo_children():
+            w.destroy()
+        
+        course_names = ["Easy", "Normal", "Hard", "Oni", "Edit"]
+        course_jp   = ["かんたん", "ふつう", "むずかしい", "鬼", "裏鬼"]
+        genres = ["ポップス","キッズ","アニメ","ボーカロイド","ゲームミュージック","バラエティ","クラシック","ナムコオリジナル"]
+        
+        # 譜面非表示のデフォルト値を保存する辞書を初期化
+        if not hasattr(self, 'song_hidden'):
+            self.song_hidden = {}
+        
+        for i in range(max(len(self.song_paths), 1)):
+            # メインの行フレーム（1行目）
+            row1 = Frame(self.song_settings_frame)
+            row1.pack(fill=tk.X, pady=2)
+        
+            if i < len(self.song_paths):
+                path = self.song_paths[i]
+                fname = os.path.basename(path)
+                # ファイル名表示を短く
+                disp = fname if len(fname) <= 20 else fname[:17] + "..."
+        
+                # 1行目: 基本情報
+                # 曲番号 (列0)
+                Label(row1, text=f"曲{i+1}", font=("MS Gothic", 10, "bold"), 
+                      width=4, anchor="w").grid(row=0, column=0, padx=(2,2), sticky="w")
+        
+                # ファイル名 (列1)
+                Label(row1, text=disp, font=("MS Gothic", 9), fg="#333399", 
+                      anchor="w", width=24).grid(row=0, column=1, padx=(0,10), sticky="w")
+        
+                # 難易度選択 (列2)
+                avail = self.song_course_values.get(i, [])
+                avail_jp = [course_jp[course_names.index(c)] for c in avail if c in course_names]
+                cur = self.song_courses_temp.get(i, avail_jp[0] if avail_jp else "鬼")
+                cbox = ttk.Combobox(row1, values=avail_jp, width=10, 
+                                   font=("MS Gothic", 9), state="readonly")
+                cbox.set(cur)
+                cbox.grid(row=0, column=2, padx=(0,10), sticky="w")
+                cbox.bind("<<ComboboxSelected>>", lambda e, idx=i, cb=cbox: self.on_course_changed(idx, cb))
+        
+                # LEVEL表示 (列3)
+                lv = self.song_levels.get(i, "?")
+                Label(row1, text=f"★{lv}", font=("MS Gothic", 10), fg="#0066cc", 
+                      width=4, anchor="w").grid(row=0, column=3, padx=(0,10), sticky="w")
+                
+                # 譜面非表示チェックボックス (列4)
+                hidden_var = tk.BooleanVar(value=self.song_hidden.get(i, False))
+                hidden_cb = Checkbutton(row1, text="曲名を非表示", 
+                                       variable=hidden_var,
+                                       font=("MS Gothic", 9),
+                                       bg=self.song_settings_frame.cget("bg"))
+                hidden_cb.grid(row=0, column=4, padx=(0,2), sticky="w")
+                
+                # チェックボックスの値を保存する関数
+                def make_hidden_callback(idx, var):
+                    def callback(*args):
+                        self.song_hidden[idx] = var.get()
+                    return callback
+                
+                # traceで値の変更を監視
+                hidden_var.trace("w", make_hidden_callback(i, hidden_var))
+                
+                # 2行目: 詳細設定
+                row2 = Frame(self.song_settings_frame)
+                row2.pack(fill=tk.X, pady=(0,5), padx=(40,0))
+                
+                # GENRE選択 (列0-1)
+                Label(row2, text="GENRE:", font=("MS Gothic", 9, "bold"), fg="#008800",
+                      width=6, anchor="w").grid(row=0, column=0, padx=(0,1), sticky="w")
+                
+                gbox = ttk.Combobox(row2, values=genres, width=18, 
+                                   font=("MS Gothic", 8), state="readonly")
+                gbox.set(self.song_genres.get(i, "ナムコオリジナル"))
+                gbox.grid(row=0, column=1, padx=(0,15), sticky="w")
+                gbox.bind("<<ComboboxSelected>>", lambda e, idx=i, gb=gbox: self.song_genres.__setitem__(idx, gb.get()))
+        
+               # SCOREINITエントリー (列2-3)
+                Label(row2, text="INIT:", font=("MS Gothic", 9, "bold"), fg="#0000aa",
+                      width=5, anchor="w").grid(row=0, column=2, padx=(0,1), sticky="w")
+                
+                init_e = Entry(row2, width=7, font=("MS Gothic", 9), 
+                              justify="center", bg="#f0f8ff")
+                init_e.insert(0, self.song_scoreinit.get(i, ""))
+                init_e.grid(row=0, column=3, padx=(0,15), sticky="w")
+                
+                # リアルタイムで値を保存する関数を作成
+                def make_init_callback(idx, entry):
+                    def callback(*args):
+                        self.song_scoreinit[idx] = entry.get().strip()
+                    return callback
+                
+                init_e.bind("<KeyRelease>", make_init_callback(i, init_e))
+        
+                # SCOREDIFFエントリー (列4-5)
+                Label(row2, text="DIFF:", font=("MS Gothic", 9, "bold"), fg="#cc4400",
+                      width=5, anchor="w").grid(row=0, column=4, padx=(0,1), sticky="w")
+                
+                diff_e = Entry(row2, width=7, font=("MS Gothic", 9), 
+                              justify="center", bg="#fff0f0")
+                diff_e.insert(0, self.song_scorediff.get(i, ""))
+                diff_e.grid(row=0, column=5, padx=(0,5), sticky="w")
+                
+                # リアルタイムで値を保存する関数を作成
+                def make_diff_callback(idx, entry):
+                    def callback(*args):
+                        self.song_scorediff[idx] = entry.get().strip()
+                    return callback
+                
+                diff_e.bind("<KeyRelease>", make_diff_callback(i, diff_e))
+        
+            else:
+                Label(row1, text="曲を追加すると設定がここに表示されます", 
+                      font=("MS Gothic", 9), fg="#999999")\
+                    .grid(row=0, column=0, columnspan=5, pady=6)
+        
+            # 重量設定
+            row1.grid_columnconfigure(1, weight=1)
+        
+        # サイズを変更しない - 固定サイズのまま
+        # ウィンドウのレイアウトを更新するだけ
+        if hasattr(self, 'dan_window') and self.dan_window:
+            self.dan_window.update_idletasks()
+    
+    def on_genre_changed(self, song_idx, combobox):
+        """GENREが変更されたときの処理"""
+        selected_genre = combobox.get()
+        self.song_genres[song_idx] = selected_genre
+    
+    def on_scoreinit_changed(self, song_idx, entry):
+        """SCOREINITが変更されたときの処理"""
+        value = entry.get().strip()
+        self.song_scoreinit[song_idx] = value
+    
+    def on_scorediff_changed(self, song_idx, entry):
+        """SCOREDIFFが変更されたときの処理"""
+        value = entry.get().strip()
+        self.song_scorediff[song_idx] = value
+        
+        def _close_dan_window(self):
+            # ← マウスホイールバインディング解除
+            if hasattr(self, 'dan_window') and self.dan_window:
+                try:
+                    self.dan_window.unbind_all("<MouseWheel>")
+                except:
+                    pass
+            
+            # ← ウィジェット完全破棄
+            if hasattr(self, 'per_song_widgets'):
+                for item in self.per_song_widgets:
+                    for widget_tuple in self.per_song_widgets[item]:
+                        for w in widget_tuple:
+                            try:
+                                if w.winfo_exists():
+                                    w.destroy()
+                            except:
+                                pass
+            
+            if self.dan_window:
+                self.dan_window.destroy()
+                self.dan_window = None
+        
+            # 不要な曲設定を削除(曲数に合わせて整理)
+            if hasattr(self, 'song_courses_temp'):
+                self.song_courses_temp = {
+                    i: self.song_courses_temp[i]
+                    for i in range(len(self.song_paths))
+                    if i in self.song_courses_temp
+                }
+        
+            if hasattr(self, 'song_settings_frame') and self.song_settings_frame:
+                try:
+                    self.update_song_settings()
+                except:
+                    pass
 
     def toggle_per_song(self, item):
         var = self.per_song_vars[item]
@@ -4169,167 +4583,15 @@ class TJAEditor:
         
         # フレームのサイズを調整
         frame.update_idletasks()
-
-    def update_song_settings(self):
-        if not hasattr(self, 'song_listbox') or not self.song_listbox.winfo_exists():
-            return
-        
-        self.song_listbox.delete(0, tk.END)
-        if self.song_paths:
-            for i, path in enumerate(self.song_paths):
-                # ファイル名を短く表示
-                fname = os.path.basename(path)
-                if len(fname) > 25:
-                    fname = fname[:22] + "..."
-                self.song_listbox.insert(tk.END, f"{i+1}. {fname}")
-        else:
-            self.song_listbox.insert(tk.END, "（曲を追加してください）")
-    
-        # フレームは必ず最初から作成
-        container = self.dan_window.winfo_children()[0].winfo_children()[0]
-        if not hasattr(self, 'song_settings_frame') or not self.song_settings_frame.winfo_exists():
-            self.song_settings_frame = LabelFrame(container, text="■ 各曲の設定 ■", 
-                                                font=("メイリオ", 11, "bold"), padx=8, pady=8)
-            self.song_settings_frame.pack(fill=tk.X, pady=(8, 0), before=self.gen_btn)
-    
-        for w in self.song_settings_frame.winfo_children():
-            w.destroy()
-    
-        course_names = ["Easy", "Normal", "Hard", "Oni", "Edit"]
-        course_jp   = ["かんたん", "ふつう", "むずかしい", "鬼", "裏鬼"]
-        genres = ["ポップス","キッズ","アニメ","ボーカロイド","ゲームミュージック","バラエティ","クラシック","ナムコオリジナル"]
-    
-        # ウィジェットの幅を調整（横幅1150pxに収まるように）
-        column_widths = {
-            0: 4,    # 曲番号
-            1: 28,   # ファイル名
-            2: 12,   # 難易度
-            3: 4,    # LEVEL
-            4: 6,    # GENREラベル
-            5: 20,   # GENRE選択（少し狭く）
-            6: 5,    # INITラベル
-            7: 7,    # INIT入力
-            8: 5,    # DIFFラベル
-            9: 7     # DIFF入力
-        }
-    
-        for i in range(max(len(self.song_paths), 1)):
-            row = Frame(self.song_settings_frame)
-            row.pack(fill=tk.X, pady=2)
-    
-            if i < len(self.song_paths):
-                path = self.song_paths[i]
-                fname = os.path.basename(path)
-                # ファイル名表示を短く
-                disp = fname if len(fname) <= 20 else fname[:17] + "..."
-    
-                # 曲番号
-                Label(row, text=f"曲{i+1}", font=("MS Gothic", 10, "bold"), 
-                      width=column_widths[0], anchor="w").grid(row=0, column=0, padx=(2,2), sticky="w")
-    
-                # ファイル名
-                Label(row, text=disp, font=("MS Gothic", 9), fg="#333399", 
-                      anchor="w", width=column_widths[1]).grid(row=0, column=1, padx=(0,2), sticky="w")
-    
-                # 難易度選択
-                avail = self.song_course_values.get(i, [])
-                avail_jp = [course_jp[course_names.index(c)] for c in avail if c in course_names]
-                cur = self.song_courses_temp.get(i, avail_jp[0] if avail_jp else "鬼")
-                cbox = ttk.Combobox(row, values=avail_jp, width=column_widths[2]-2, 
-                                   font=("MS Gothic", 9), state="readonly")
-                cbox.set(cur)
-                cbox.grid(row=0, column=2, padx=2, sticky="w")
-                cbox.bind("<<ComboboxSelected>>", lambda e, idx=i, cb=cbox: self.on_course_changed(idx, cb))
-    
-                # LEVEL表示
-                lv = self.song_levels.get(i, "?")
-                Label(row, text=f"★{lv}", font=("MS Gothic", 10), fg="#0066cc", 
-                      width=column_widths[3], anchor="w").grid(row=0, column=3, padx=2, sticky="w")
-    
-                # GENRE選択
-                Label(row, text="GENRE:", font=("MS Gothic", 9, "bold"), fg="#008800",
-                      width=column_widths[4], anchor="w").grid(row=0, column=4, padx=(8,1), sticky="w")
-                gbox = ttk.Combobox(row, values=genres, width=column_widths[5]-2, 
-                                   font=("MS Gothic", 8), state="readonly")
-                gbox.set(self.song_genres.get(i, "ナムコオリジナル"))
-                gbox.grid(row=0, column=5, padx=1, sticky="w")
-                gbox.bind("<<ComboboxSelected>>", lambda e, idx=i: self.song_genres.__setitem__(idx, gbox.get()))
-    
-                # INIT
-                Label(row, text="INIT:", font=("MS Gothic", 9, "bold"), fg="#0000aa",
-                      width=column_widths[6], anchor="w").grid(row=0, column=6, padx=(8,1), sticky="w")
-                init_e = Entry(row, width=column_widths[7], font=("MS Gothic", 9), 
-                              justify="center", bg="#f0f8ff")
-                init_e.insert(0, self.song_scoreinit.get(i, ""))
-                init_e.grid(row=0, column=7, padx=1, sticky="w")
-    
-                # DIFF
-                Label(row, text="DIFF:", font=("MS Gothic", 9, "bold"), fg="#cc4400",
-                      width=column_widths[8], anchor="w").grid(row=0, column=8, padx=(6,1), sticky="w")
-                diff_e = Entry(row, width=column_widths[9], font=("MS Gothic", 9), 
-                              justify="center", bg="#fff0f0")
-                diff_e.insert(0, self.song_scorediff.get(i, ""))
-                diff_e.grid(row=0, column=9, padx=1, sticky="w")
-    
-            else:
-                Label(row, text="曲を追加すると設定がここに表示されます", 
-                      font=("MS Gothic", 9), fg="#999999")\
-                    .grid(row=0, column=0, columnspan=10, pady=6)
-    
-            # 各列の重量設定
-            row.grid_columnconfigure(1, weight=1)
-            for col in range(10):
-                if col != 1:
-                    row.grid_columnconfigure(col, weight=0)
-        
-        # サイズを変更しない - 固定サイズのまま
-        # ウィンドウのレイアウトを更新するだけ
-        if hasattr(self, 'dan_window') and self.dan_window:
-            self.dan_window.update_idletasks()
             
     def on_course_changed(self, song_idx, combobox):
         selected = combobox.get()
         self.song_courses_temp[song_idx] = selected
+        
+        # LEVELのみ更新
         self.update_level_and_genre(song_idx)
-
-    def update_level_and_genre(self, song_idx):
-        if song_idx >= len(self.song_paths):
-            return
-        path = self.song_paths[song_idx]
-        selected_jp = self.song_courses_temp.get(song_idx, "鬼")
-        course_map = {"かんたん":"Easy","ふつう":"Normal","むずかしい":"Hard","鬼":"Oni","裏鬼":"Edit"}
-        target = course_map.get(selected_jp, "Oni")
-        level = "?"
-        scoreinit = ""
-        scorediff = ""
-        genre = "ナムコオリジナル"
-        try:
-            with open(path, 'r', encoding='shift_jis', errors='ignore') as f:
-                content = f.read()
-            current_course = None
-            for line in content.splitlines():
-                s = line.strip()
-                m = re.match(r"COURSE:\s*([^\s]+)", s, re.I)
-                if m:
-                    c = m.group(1).strip()
-                    if c in ["0","1","2","3","4"]:
-                        c = ["Easy","Normal","Hard","Oni","Edit"][int(c)]
-                    current_course = c.capitalize()
-                if current_course == target:
-                    lm = re.match(r"LEVEL:\s*(\d+)", s, re.I)
-                    if lm: level = lm.group(1)
-                    im = re.match(r"SCOREINIT:\s*(\d+)", s, re.I)
-                    if im: scoreinit = im.group(1)
-                    dm = re.match(r"SCOREDIFF:\s*(\d+)", s, re.I)
-                    if dm: scorediff = dm.group(1)
-                    gm = re.match(r"GENRE:\s*(.+)", s, re.I)
-                    if gm: genre = gm.group(1).strip()
-        except Exception:
-            pass
-        self.song_levels[song_idx] = level
-        self.song_scoreinit[song_idx] = scoreinit
-        self.song_scorediff[song_idx] = scorediff
-        self.song_genres[song_idx] = genre
+        
+        # UIを更新
         self.update_song_settings()
 
     def add_song(self):
@@ -4348,11 +4610,82 @@ class TJAEditor:
             default_jp = available_jp[0] if available_jp else "鬼"
             self.song_courses_temp[idx] = default_jp
             self.song_levels[idx] = "?"
+            
+            # ★ 選択されたCOURSE（デフォルト）からSCOREINITとSCOREDIFFを取得
+            scoreinit = ""
+            scorediff = ""
+            
+            try:
+                # 文字エンコーディングの自動判定（BOM付きUTF-8対応）
+                with open(path, "rb") as f:
+                    raw = f.read()
+                
+                import chardet
+                encoding_info = chardet.detect(raw)
+                detected_encoding = encoding_info["encoding"] or "shift_jis"
+                
+                if detected_encoding.lower().startswith("utf") and raw.startswith(b"\xef\xbb\xbf"):
+                    encoding = "utf-8-sig"
+                else:
+                    encoding = detected_encoding
+                
+                content = raw.decode(encoding, errors="replace")
+                
+                # デフォルトCOURSEを英語名に変換
+                course_map = {"かんたん":"Easy","ふつう":"Normal","むずかしい":"Hard","鬼":"Oni","裏鬼":"Edit"}
+                target_course = course_map.get(default_jp, "Oni")
+                
+                # 選択されたCOURSEから値を取得
+                lines = content.splitlines()
+                current_course = None
+                in_target_course = False
+                
+                for line in lines:
+                    s = line.strip()
+                    
+                    # COURSE検出
+                    m = re.match(r"COURSE:\s*([^\s#;]+)", s, re.I)
+                    if m:
+                        c = m.group(1).strip()
+                        if c in ["0","1","2","3","4"]:
+                            c = ["Easy","Normal","Hard","Oni","Edit"][int(c)]
+                        current_course = c.capitalize()
+                        in_target_course = (current_course == target_course)
+                        continue
+                    
+                    # 選択されたCOURSE内でのみ値を取得
+                    if in_target_course:
+                        si_match = re.match(r"SCOREINIT:\s*(\d+)", s, re.I)
+                        if si_match:
+                            scoreinit = si_match.group(1)
+                        
+                        sd_match = re.match(r"SCOREDIFF:\s*(\d+)", s, re.I)
+                        if sd_match:
+                            scorediff = sd_match.group(1)
+                    
+                    # グローバル領域の検索
+                    elif current_course is None:
+                        if not scoreinit:
+                            si_match = re.match(r"SCOREINIT:\s*(\d+)", s, re.I)
+                            if si_match:
+                                scoreinit = si_match.group(1)
+                        
+                        if not scorediff:
+                            sd_match = re.match(r"SCOREDIFF:\s*(\d+)", s, re.I)
+                            if sd_match:
+                                scorediff = sd_match.group(1)
+                            
+            except Exception as e:
+                print(f"ファイル読み込みエラー: {e}")
+            
+            # GENREはデフォルト値、SCOREINITとSCOREDIFFは取得した値
             self.song_genres[idx] = "ナムコオリジナル"
-            self.song_scoreinit[idx] = ""
-            self.song_scorediff[idx] = ""
+            self.song_scoreinit[idx] = scoreinit
+            self.song_scorediff[idx] = scorediff
+            
             self.update_song_settings()
             self.update_add_button()
+            # LEVEL取得を実行（念のため）
             self.root.after(200, lambda: self.update_level_and_genre(idx))
 
     def remove_song(self):
@@ -4397,9 +4730,23 @@ class TJAEditor:
         self.song_listbox.selection_set(idx+1)
 
     def parse_courses_from_tja(self, path):
+        """TJAファイルからCOURSE一覧を取得（BOM付きUTF-8対応）"""
         try:
-            with open(path, 'r', encoding='shift_jis', errors='ignore') as f:
-                content = f.read()
+            # エンコーディング自動判定
+            with open(path, "rb") as f:
+                raw = f.read()
+            
+            import chardet
+            encoding_info = chardet.detect(raw)
+            detected_encoding = encoding_info["encoding"] or "shift_jis"
+            
+            if detected_encoding.lower().startswith("utf") and raw.startswith(b"\xef\xbb\xbf"):
+                encoding = "utf-8-sig"
+            else:
+                encoding = detected_encoding
+            
+            content = raw.decode(encoding, errors="ignore")
+            
             courses = set()
             for m in re.finditer(r"^\s*COURSE:\s*([^\s#;]+)", content, re.M | re.I):
                 raw = m.group(1).strip()
@@ -4412,14 +4759,19 @@ class TJAEditor:
                 else:
                     course_name = raw.capitalize()
                 courses.add(course_name)
+            
             if not courses:
                 return ["Oni"]
+            
             order = ["Easy", "Normal", "Hard", "Oni", "Edit"]
             return sorted(courses, key=lambda x: order.index(x) if x in order else 999)
-        except Exception:
+        
+        except Exception as e:
+            print(f"COURSE解析エラー ({path}): {e}")
             return ["Oni"]
 
     def extract_song_data(self, content, target_course):
+        """曲データを抽出 - エンコーディングは呼び出し元で処理済み"""
         lines = content.splitlines()
         global_headers = {}
         course_headers = {}
@@ -4427,18 +4779,21 @@ class TJAEditor:
         current_course = None
         in_chart = False
         chart_lines = []
-
-        forbidden_starts = {"#START", "#P1START", "#P2START"}
-        forbidden_ends = {"#END", "#P1END", "#P2END"}
-
+        in_target_course = False
+        measure_info = None  # 追加: #MEASURE情報を保存
+    
+        forbidden_starts = {"#START", "#START P1", "#START P2"}
+        forbidden_ends = "#END"
+    
         header_pattern = re.compile(r"^(\w+):\s*(.+)", re.IGNORECASE)
         course_pattern = re.compile(r"^COURSE:\s*(.+)", re.IGNORECASE)
-
+        measure_pattern = re.compile(r"^#MEASURE\s+(\S+)", re.IGNORECASE)  # 追加: #MEASUREパターン
+    
         for raw_line in lines:
             line = raw_line.strip()
             if not line or line.startswith("//"):
                 continue
-
+    
             # COURSE切り替え
             course_match = course_pattern.match(line)
             if course_match:
@@ -4450,30 +4805,63 @@ class TJAEditor:
                     if course_name == "Ura":
                         course_name = "Edit"
                 current_course = course_name
+                in_target_course = (current_course == target_course)
                 continue
-
+    
+            # #MEASURE検出（選んだコース内のみ）
+            measure_match = measure_pattern.match(line)
+            if measure_match and in_target_course:
+                measure_info = measure_match.group(1).strip()
+                # デフォルトで4/4に正規化
+                if measure_info in ["44", "4/4"]:
+                    measure_info = "4/4"
+    
             # ヘッダー行
             header_match = header_pattern.match(line)
             if header_match:
                 key = header_match.group(1).upper()
                 value = header_match.group(2).strip()
-
+    
+                # SUBTITLEの特別処理: 空白または(--)の場合は空白のまま
+                if key == "SUBTITLE":
+                    # 値が空または空白だけの場合は空文字にする
+                    if not value or value.isspace():
+                        value = ""
+                    # 先頭に(--)がある場合、それを排除して残りの文字列を取得
+                    elif value.startswith("--"):
+                        # (--)を削除して、残りがあればそれを取得
+                        remaining = value[2:].strip()
+                        value = remaining if remaining else ""
+                    # 完全に(--)だけの場合も空文字にする
+                    elif value == "--":
+                        value = ""
+                    # その他の場合はそのまま
+    
+                # ★ 選択されたCOURSE内でのみSCOREINITとSCOREDIFFを取得
+                if in_target_course and key in ["SCOREINIT", "SCOREDIFF"]:
+                    course_headers[key] = value
+                    continue
+                    
+                # GENREは完全除外（手動設定のみ使用）
+                if key == "GENRE":
+                    continue
+                
                 if key == "BALLOON":
-                    # BALLOONだけは選んだコース優先（他のコースは無視）
-                    if current_course == target_course:
+                    # BALLOONだけは選んだコース優先(他のコースは無視)
+                    if in_target_course:
                         balloons = [v.strip() for v in value.split(",") if v.strip().isdigit()]
                         course_headers["BALLOON"] = course_headers.get("BALLOON", []) + balloons
-                    # 他のコースのBALLOONは完全無視（global_headersにも入れない！）
                 else:
-                    # その他のヘッダー（TITLE, SUBTITLE, WAVE, BPM, LEVELなど）は
-                    # コース内でもグローバルでも両方保存 → あとでコース優先でマージ
-                    target_dict = course_headers if current_course == target_course else global_headers
-                    target_dict[key] = value
+                    # その他のヘッダーは選択されたCOURSE内でのみ保存
+                    if in_target_course:
+                        course_headers[key] = value
+                    elif key not in course_headers:  # グローバル値は補完用
+                        global_headers[key] = value
                 continue
-
-            # 譜面開始/終了（選んだコースのみ）
+    
+            # 譜面開始/終了(選んだコースのみ)
             if line.upper() in forbidden_starts:
-                if current_course == target_course:
+                if in_target_course:
                     in_chart = True
                     chart_lines = [raw_line]
                 continue
@@ -4484,18 +4872,18 @@ class TJAEditor:
                     in_chart = False
                     chart_lines = []
                 continue
-
+    
             if in_chart:
                 chart_lines.append(raw_line)
-
-        # BALLOONは選んだコースのものだけ使う（重複・順序そのまま）
+    
+        # BALLOONは選んだコースのものだけ使う
         if "BALLOON" in course_headers:
             course_headers["BALLOON"] = ",".join(course_headers["BALLOON"])
-
-        # その他のヘッダーはコース優先 + グローバル補完
-        headers = {**global_headers, **course_headers}  # コースが上書き優先
-
-        return headers, chart
+    
+        # ヘッダーは選択されたCOURSE優先 + グローバル補完
+        headers = {**global_headers, **course_headers}
+    
+        return headers, chart, measure_info  # measure_infoも返すように変更
 
     def get_exam_str_common(self, item):
         t = self.common_type_combos[item].get()
@@ -4541,17 +4929,17 @@ class TJAEditor:
         if not self.song_paths:
             messagebox.showerror("エラー", "曲が1つも選択されていません", parent=self.dan_window)
             return
-
+    
         # タイトル欄からファイル名候補を取得（空欄の場合はデフォルト）
         dan_title = self.dan_title_entry.get().strip()
         if not dan_title:
             dan_title = "段位道場"
-
+    
         # Windows/macOS/Linux で安全なファイル名に変換（禁止文字をアンダースコアに置換）
         import re
         safe_filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', dan_title)
         default_filename = f"{safe_filename}.tja"
-
+    
         # 保存ダイアログ（前回保存フォルダを優先）
         initial_dir = getattr(self, "last_folder", os.path.expanduser("~"))
         save_path = filedialog.asksaveasfilename(
@@ -4564,21 +4952,197 @@ class TJAEditor:
         )
         if not save_path:
             return  # キャンセル
-
+    
         # 次回ダイアログの初期フォルダを更新
         self.last_folder = os.path.dirname(save_path)
-
+    
         # TJA本文の生成（既存ロジックをほぼそのまま使用）
         code = []
+        
+        # ヘッダー部分を指定された順序で出力
         code.append(f"TITLE:{dan_title}\n")
-        code.append("SUBTITLE:--\n")
-        code.append("WAVE:\n")
+        
+        # SUBTITLE: 空白の場合は空白のまま（"--" を挿入しない）
+        # 段位道場のヘッダーとしてSUBTITLEは空白で良い
+        code.append("SUBTITLE:\n")  # 空白を挿入（"--"ではなく空のまま）
+        
+        # BPMとWAVEは1曲目から取得（BOM付UTF-8対応）
+        first_song_bpm = ""
+        first_song_wave = ""
+        if self.song_paths:
+            try:
+                # BOM付UTF-8対応のファイル読み込み
+                with open(self.song_paths[0], "rb") as f:
+                    raw_data = f.read()
+                
+                # BOM検出と適切なエンコーディングの選択
+                if raw_data.startswith(b'\xef\xbb\xbf'):  # UTF-8 BOM
+                    content = raw_data.decode('utf-8-sig')
+                elif raw_data.startswith(b'\xff\xfe') or raw_data.startswith(b'\xfe\xff'):  # UTF-16 BOM
+                    # UTF-16はあまり使われないが、一応対応
+                    try:
+                        content = raw_data.decode('utf-16')
+                    except:
+                        content = raw_data.decode('shift_jis', errors='ignore')
+                else:
+                    # BOMなしの場合はSHIFT-JISまたはUTF-8を試す
+                    try:
+                        content = raw_data.decode('shift_jis')
+                    except:
+                        content = raw_data.decode('utf-8', errors='ignore')
+                
+                # BPMを検索
+                bpm_match = re.search(r'^BPM:\s*(.+)', content, re.MULTILINE | re.IGNORECASE)
+                if bpm_match:
+                    first_song_bpm = bpm_match.group(1).strip()
+                # WAVEを検索
+                wave_match = re.search(r'^WAVE:\s*(.+)', content, re.MULTILINE | re.IGNORECASE)
+                if wave_match:
+                    first_song_wave = wave_match.group(1).strip()
+            except Exception as e:
+                print(f"BPM/WAVE取得エラー: {e}")
+    
+        code.append(f"BPM:{first_song_bpm}\n")
+        code.append(f"WAVE:{first_song_wave}\n")
+        
+        # SCOREMODEは段位道場なので2固定
         code.append("SCOREMODE:2\n")
+        
+        # COURSEはDan固定
         code.append("COURSE:Dan\n")
+        
+        # GENRE
         dan_color = getattr(self, "dan_genre_var", tk.StringVar(value="金")).get()
         code.append(f"GENRE:段位-{dan_color}\n")
-
-        # 共通合格条件
+        
+        # LEVEL（適当な値を設定、または1曲目から取得）
+        level = "10"
+        if self.song_paths:
+            try:
+                # BOM付UTF-8対応のファイル読み込み
+                with open(self.song_paths[0], "rb") as f:
+                    raw_data = f.read()
+                
+                # BOM検出と適切なエンコーディングの選択
+                if raw_data.startswith(b'\xef\xbb\xbf'):  # UTF-8 BOM
+                    content = raw_data.decode('utf-8-sig')
+                elif raw_data.startswith(b'\xff\xfe') or raw_data.startswith(b'\xfe\xff'):  # UTF-16 BOM
+                    try:
+                        content = raw_data.decode('utf-16')
+                    except:
+                        content = raw_data.decode('shift_jis', errors='ignore')
+                else:
+                    try:
+                        content = raw_data.decode('shift_jis')
+                    except:
+                        content = raw_data.decode('utf-8', errors='ignore')
+                
+                level_match = re.search(r'^LEVEL:\s*(\d+)', content, re.MULTILINE | re.IGNORECASE)
+                if level_match:
+                    level = level_match.group(1).strip()
+            except Exception as e:
+                print(f"LEVEL取得エラー: {e}")
+        
+        code.append(f"LEVEL:{level}\n")
+    
+        course_id_map = {"Easy": "0", "Normal": "1", "Hard": "2", "Oni": "3", "Edit": "4"}
+        all_balloons = []
+        song_data = []
+    
+        # 各曲のヘッダー・譜面抽出
+        for i, path in enumerate(self.song_paths):
+            selected_jp = self.song_courses_temp.get(i, "鬼")
+            map_jp = {"かんたん": "Easy", "ふつう": "Normal", "むずかしい": "Hard", "鬼": "Oni", "裏鬼": "Edit"}
+            target_course = map_jp.get(selected_jp, "Oni")
+    
+            try:
+                # BOM付UTF-8対応のファイル読み込み
+                with open(path, "rb") as f:
+                    raw_data = f.read()
+                
+                # BOM検出と適切なエンコーディングの選択
+                if raw_data.startswith(b'\xef\xbb\xbf'):  # UTF-8 BOM
+                    content = raw_data.decode('utf-8-sig')
+                elif raw_data.startswith(b'\xff\xfe') or raw_data.startswith(b'\xfe\xff'):  # UTF-16 BOM
+                    try:
+                        content = raw_data.decode('utf-16')
+                    except:
+                        content = raw_data.decode('shift_jis', errors='ignore')
+                else:
+                    # BOMなしの場合はSHIFT-JISまたはUTF-8を試す
+                    try:
+                        content = raw_data.decode('shift_jis')
+                    except:
+                        content = raw_data.decode('utf-8', errors='ignore')
+    
+                headers, chart, measure_info = self.extract_song_data(content, target_course)
+    
+                # BALLOONは選択したコースのものだけ取得
+                if headers.get("BALLOON"):
+                    balloons = [b.strip() for b in headers["BALLOON"].split(",") if b.strip().isdigit()]
+                    all_balloons.extend(balloons)
+    
+                # ★ GENRE: open_dan_windowで指定した値のみ使用(デフォルト: ナムコオリジナル)
+                genre_value = self.song_genres.get(i, "ナムコオリジナル").strip()
+                if not genre_value:  # 空白の場合
+                    genre_value = "ナムコオリジナル"
+                
+                # ★ SCOREINIT: ファイルから取得した値とUI入力値をマージ
+                file_scoreinit = headers.get("SCOREINIT", "").strip()
+                ui_scoreinit = self.song_scoreinit.get(i, "").strip()
+                
+                # UIで入力されていればUIの値を優先、そうでなければファイルの値
+                final_scoreinit = ui_scoreinit if ui_scoreinit else file_scoreinit
+                # 数値チェックとデフォルト設定
+                if not final_scoreinit or not final_scoreinit.isdigit():
+                    final_scoreinit = "0"
+                    
+                # ★ SCOREDIFF: ファイルから取得した値とUI入力値をマージ
+                file_scorediff = headers.get("SCOREDIFF", "").strip()
+                ui_scorediff = self.song_scorediff.get(i, "").strip()
+                
+                # UIで入力されていればUIの値を優先、そうでなければファイルの値
+                final_scorediff = ui_scorediff if ui_scorediff else file_scorediff
+                # 数値チェックとデフォルト設定
+                if not final_scorediff or not final_scorediff.isdigit():
+                    final_scorediff = "0"
+    
+                level = self.song_levels.get(i, headers.get("LEVEL", "10")).strip()
+    
+                # SUBTITLEの処理: 空白の場合は空白のまま
+                subtitle = headers.get("SUBTITLE", "").strip()
+                # extract_song_dataで既に処理されているが、念のため再度処理
+                if not subtitle or subtitle.isspace() or subtitle == "--":
+                    subtitle = ""
+                elif subtitle.startswith("--"):
+                    # (--)を削除して、残りがあればそれを取得
+                    remaining = subtitle[2:].strip()
+                    subtitle = remaining if remaining else ""
+    
+                song_data.append({
+                    "title": headers.get("TITLE", "無題").strip() or "無題",
+                    "subtitle": subtitle,  # 空白の場合は空白のまま
+                    "wave": headers.get("WAVE", "").strip(),
+                    "genre": genre_value,  # ★ 手動設定の値のみ
+                    "scoreinit": final_scoreinit,  # ★ マージした値（UI優先）
+                    "scorediff": final_scorediff,  # ★ マージした値（UI優先）
+                    "chart": chart,
+                    "course": target_course,
+                    "level": level,
+                    "bpm": headers.get("BPM", ""),
+                    "offset": headers.get("OFFSET", "0"),
+                    "measure": measure_info,
+                })
+    
+            except Exception as e:
+                messagebox.showerror("読み込み失敗", f"{os.path.basename(path)}\n{e}", parent=self.dan_window)
+                return
+    
+        # BALLOON出力（LEVELの直後、EXAM1より前に配置）
+        if all_balloons:
+            code.append(f"BALLOON:{','.join(all_balloons)}\n")
+    
+        # 共通合格条件（BALLOONの後に出力）
         for item in self.DAN_ITEMS:
             if not self.per_song_vars[item].get():
                 try:
@@ -4587,85 +5151,33 @@ class TJAEditor:
                 except ValueError as e:
                     messagebox.showerror("入力エラー", f"{item}: {e}", parent=self.dan_window)
                     return
-
-        course_id_map = {"Easy": "0", "Normal": "1", "Hard": "2", "Oni": "3", "Edit": "4"}
-        all_balloons = []
-        song_data = []
-
-        # 各曲のヘッダー・譜面抽出
-        for i, path in enumerate(self.song_paths):
-            selected_jp = self.song_courses_temp.get(i, "鬼")
-            map_jp = {"かんたん": "Easy", "ふつう": "Normal", "むずかしい": "Hard", "鬼": "Oni", "裏鬼": "Edit"}
-            target_course = map_jp.get(selected_jp, "Oni")
-
-            try:
-                with open(path, "r", encoding="shift_jis", errors="ignore") as f:
-                    content = f.read()
-
-                headers, chart = self.extract_song_data(content, target_course)
-
-                # BALLOONは選択したコースのものだけ取得
-                if headers.get("BALLOON"):
-                    balloons = [b.strip() for b in headers["BALLOON"].split(",") if b.strip().isdigit()]
-                    all_balloons.extend(balloons)
-
-                # 手動設定の優先適用
-                headers["GENRE"] = self.song_genres.get(i, headers.get("GENRE", "ナムコオリジナル")).strip()
-                if self.song_scoreinit.get(i, "").strip():
-                    headers["SCOREINIT"] = self.song_scoreinit[i].strip()
-                if self.song_scorediff.get(i, "").strip():
-                    headers["SCOREDIFF"] = self.song_scorediff[i].strip()
-
-                level = self.song_levels.get(i, headers.get("LEVEL", "10")).strip()
-
-                song_data.append({
-                    "title": headers.get("TITLE", "無題").strip() or "無題",
-                    "subtitle": headers.get("SUBTITLE", "").strip(),
-                    "wave": headers.get("WAVE", "").strip(),
-                    "genre": headers["GENRE"],
-                    "scoreinit": headers.get("SCOREINIT", "").strip() or "-",
-                    "scorediff": headers.get("SCOREDIFF", "").strip() or "-",
-                    "chart": chart,
-                    "course": target_course,
-                    "level": level,
-                    "bpm": headers.get("BPM", ""),
-                    "offset": headers.get("OFFSET", "0"),
-                })
-
-            except Exception as e:
-                messagebox.showerror("読み込み失敗", f"{os.path.basename(path)}\n{e}", parent=self.dan_window)
-                return
-
-        # BALLOON出力
-        if all_balloons:
-            code.append(f"BALLOON:{','.join(all_balloons)}\n")
-
-        code.append("\n#START\n")
-
+    
+        # #STARTの前に2つの改行を追加
+        code.append("\n\n#START\n\n\n")
+    
         # 各曲の出力
         for i, data in enumerate(song_data):
+            # SUBTITLEの処理: 空白の場合は空白のまま
+            subtitle_for_nextsong = data["subtitle"]
+            
+            # 譜面非表示フラグを取得
+            is_hidden = self.song_hidden.get(i, False)
+            
+            # #NEXTSONGの各フィールドを準備（既にマージ済みの値を使用）
             parts = [
-                data["title"],
-                data["subtitle"] or "-",
-                data["wave"] or "-",
-                data["genre"],
-                data["scoreinit"],
-                data["scorediff"],
-                course_id_map.get(data["course"], "3"),
-                data["level"] or "10",
+                data["title"],  # 1. 曲名
+                subtitle_for_nextsong,  # 2. サブタイトル（空白の場合は空白のまま）
+                data["genre"],  # 3. ジャンル（open_dan_windowの値のみ使用）
+                data["wave"] if data["wave"] else "-",  # 4. 音源ファイル名
+                data["scoreinit"],  # 5. 初期スコア（UI優先でマージした値）
+                data["scorediff"],  # 6. スコア差分（UI優先でマージした値）
+                course_id_map.get(data["course"], "3"),  # 7. コースID（0:Easy, 1:Normal, 2:Hard, 3:Oni, 4:Edit）
+                data["level"] or "10",  # 8. レベル
+                "true" if is_hidden else "false",  # 9. 譜面非表示フラグ（1=非表示, 0=表示）
             ]
             code.append("#NEXTSONG " + ",".join(parts) + "\n")
-
-            if data["bpm"]:
-                code.append(f"#BPMCHANGE {data['bpm'].strip()}\n")
-            try:
-                offset = float(data["offset"])
-                if offset < 0:
-                    code.append(f"#DELAY {-offset}\n")
-            except:
-                pass
-
-            # 個別合格条件
+    
+            # 個別合格条件 - #NEXTSONGの直後に配置
             for item in self.per_song_order:
                 if i < len(self.per_song_widgets.get(item, [])):
                     try:
@@ -4674,18 +5186,51 @@ class TJAEditor:
                     except ValueError as e:
                         messagebox.showerror("入力エラー", f"曲{i+1} {item}: {e}", parent=self.dan_window)
                         return
-
+    
+            # ★ #BPMCHANGEと#DELAYをEXAM1~4より後に配置（順序：#BPMCHANGE → #DELAY）
+            if data["bpm"]:
+                code.append(f"#BPMCHANGE {data['bpm'].strip()}\n")
+    
+            try:
+                offset = float(data["offset"])
+                if offset < 0:
+                    code.append(f"#DELAY {-offset}\n")
+            except:
+                pass
+    
+            # ★ 2曲目以降で、#MEASUREが4/4でない場合の処理
+            if i >= 1:  # 2曲目以降
+                current_measure = data.get("measure")
+                # measureがNone（未設定）または4/4でない場合
+                if current_measure is None or current_measure != "4/4":
+                    # 譜面本体の最初の有効な行に#MEASUREがあるかチェック
+                    has_measure_at_start = False
+                    for line in data["chart"]:
+                        stripped = line.strip()
+                        # 空行やコメント行はスキップ
+                        if not stripped or stripped.startswith("//") or stripped.startswith(";"):
+                            continue
+                        
+                        # 最初の有効な行が#MEASUREかチェック
+                        if stripped.upper().startswith("#MEASURE"):
+                            has_measure_at_start = True
+                        break  # 最初の有効な行だけチェック
+                    
+                    # 譜面の最初に#MEASUREがない場合のみ追加
+                    if not has_measure_at_start:
+                        code.append("#MEASURE 4/4\n")
+    
             # 譜面本体（#START/#END系は除外）
-            forbidden = {"#START", "#END", "#P1START", "#P1END", "#P2START", "#P2END"}
+            forbidden = {"#START", "#END"}
             for line in data["chart"]:
                 if line.strip().upper() not in forbidden:
                     code.append(line.rstrip("\r\n") + "\n")
             code.append("\n")
             if i < len(song_data) - 1:
                 code.append(",\n")
-
+    
         code.append("#END\n")
-
+    
         # ファイル書き込み＋#NEXTSONGの.ogg自動コピー
         try:
             # 1. TJA本体を保存
@@ -4695,38 +5240,39 @@ class TJAEditor:
             # すべてのコメント（// と ;）を削除
             tja_text = self.remove_all_comments(tja_text)
             
+            # SHIFT-JISで保存（cp932はSHIFT-JISのMicrosoft拡張）
             with open(save_path, "w", encoding="cp932", newline="\n") as f:
                 f.write(tja_text)
-
+    
             # 2. #NEXTSONGから音源名を取得してコピー
             copied_files = []
             dest_folder = os.path.dirname(save_path)
-
+        
             for i, data in enumerate(song_data):
-                ogg_name = data["wave"].strip()  # #NEXTSONGの3番目に入っているもの
+                ogg_name = data["wave"].strip()  # ★ #NEXTSONGの4番目（変更前は3番目）
                 if not ogg_name:
                     continue
                 if not ogg_name.lower().endswith(".ogg"):
                     continue
-
+        
                 # 元のTJAと同じフォルダにあるはずなので、そこから探す
                 source_tja_folder = os.path.dirname(self.song_paths[i])
                 source_ogg_path = os.path.join(source_tja_folder, ogg_name)
-
+        
                 if not os.path.exists(source_ogg_path):
                     # 絶対パスだったときの保険
                     if os.path.isabs(ogg_name) and os.path.exists(ogg_name):
                         source_ogg_path = ogg_name
                     else:
                         continue  # 見つからなかったら飛ばす
-
+        
                 dest_ogg_path = os.path.join(dest_folder, ogg_name)
-
+        
                 # すでに同じ場所にある場合はコピーしない
                 if os.path.abspath(source_ogg_path) == os.path.abspath(dest_ogg_path):
                     copied_files.append(ogg_name)
                     continue
-
+        
                 try:
                     shutil.copy2(source_ogg_path, dest_ogg_path)
                     copied_files.append(ogg_name)
@@ -4736,16 +5282,16 @@ class TJAEditor:
                         f"{ogg_name} のコピーに失敗しました。\n{e}",
                         parent=self.dan_window,
                     )
-
+    
             # 3. 完了メッセージ
             msg = f"段位道場TJAを保存しました！\n\n{os.path.basename(save_path)}"
             if copied_files:
                 msg += f"\n\n以下の音源も自動でコピーしました♪\n" + "\n".join(f"・{f}" for f in copied_files)
             else:
                 msg += "\n\n（.ogg音源は見つかりませんでした）"
-
+    
             messagebox.showinfo("保存完了", msg, parent=self.dan_window)
-
+    
             # 4. 保存先フォルダを開く（前回直した安全版）
             try:
                 if os.name == "nt":
@@ -4756,7 +5302,7 @@ class TJAEditor:
                     subprocess.Popen(["xdg-open", dest_folder])
             except Exception as e:
                 print(f"フォルダを開けませんでした: {e}")
-
+    
         except Exception as e:
             messagebox.showerror("保存失敗", f"ファイルの書き込みに失敗しました。\n\n{e}", parent=self.dan_window)
 
