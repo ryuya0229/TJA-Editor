@@ -1790,7 +1790,7 @@ class TJAEditor:
                 zf.write(tja_path, arcname=tja_name)
                 
                 # WAVEファイルがあれば追加
-                if wave_path and os.path.exists(wave_path):
+                if wave_path:  # Simplified: wave_path is only set when file exists
                     zf.write(wave_path, arcname=wave_name)
                 
                 # 画像ファイルを追加
@@ -1799,7 +1799,7 @@ class TJAEditor:
 
             # 完了メッセージを作成
             file_list = f"・{tja_name}"
-            if wave_path and os.path.exists(wave_path):
+            if wave_name:  # Simplified: wave_name is only set when wave_path exists
                 file_list += f"\n・{wave_name}"
             if extra_files:
                 file_list += "\n・" + "\n・".join(os.path.basename(p) for p in extra_files)
@@ -1815,7 +1815,7 @@ class TJAEditor:
             
             # 見つからなかったファイルがある場合、警告を追加
             if missing_files:
-                success_msg += "\n\n" + "⚠ 以下の音声ファイルが見つかりませんでした:\n"
+                success_msg += "\n\n" + "【警告】以下の音声ファイルが見つかりませんでした:\n"
                 success_msg += "\n".join(f"・{f}" for f in missing_files)
                 messagebox.showwarning("配布用ZIP作成完了（警告あり）", success_msg)
             else:
@@ -6425,7 +6425,8 @@ class TJAEditor:
         
             for i, data in enumerate(song_data):
                 audio_name = data["wave"].strip()
-                if not audio_name:
+                if not audio_name or audio_name == "-":
+                    # 空または"-"（未指定）の場合はスキップ
                     continue
                 
                 # 拡張子の制限を削除（.oggだけでなく、すべての音声ファイルを処理）
@@ -6434,7 +6435,7 @@ class TJAEditor:
                 # 共通のヘルパーメソッドを使用してパス解決
                 source_audio_path = self.resolve_wave_file_path(audio_name, source_tja_folder)
         
-                if not source_audio_path or not os.path.exists(source_audio_path):
+                if not source_audio_path:
                     # 音声ファイルが見つからない場合、警告リストに追加して続行
                     missing_files.append(audio_name)
                     continue
@@ -6460,7 +6461,7 @@ class TJAEditor:
             
             # 見つからなかった/コピー失敗したファイルがある場合、警告を追加
             if missing_files:
-                msg += "\n\n⚠ 以下の音声ファイルが見つからないか、コピーに失敗しました:\n"
+                msg += "\n\n【警告】以下の音声ファイルが見つからないか、コピーに失敗しました:\n"
                 msg += "\n".join(f"・{f}" for f in missing_files)
                 messagebox.showwarning("保存完了（警告あり）", msg, parent=self.dan_window)
             elif not copied_files:
