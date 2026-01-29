@@ -1731,7 +1731,7 @@ class TJAEditor:
                 pass
 
     def create_distribution_zip(self):
-        """ツール → 配布用ZIPを作成（readmeなし・画像も自動収集）"""
+        """ツール → 配布用ZIPを作成（readmeなし・画像も自動収集）- 拡張子非依存対応"""
         if not self.current_file:
             messagebox.showwarning("未保存", "先にTJAファイルを保存してください。")
             return
@@ -1741,14 +1741,22 @@ class TJAEditor:
         tja_name = os.path.basename(tja_path)
         song_title = os.path.splitext(tja_name)[0]
 
-        # WAVEファイルを探す（既存のfind_wave_pathを使用）
-        wave_path = self.find_wave_path()
-        if not wave_path or not os.path.exists(wave_path):
-            messagebox.showwarning("音声ファイル未検出", 
-                                 "WAVE: で指定された音声ファイルが見つかりません。\n"
-                                 "TJAと同じフォルダに配置してください。")
-            return
-        wave_name = os.path.basename(wave_path)
+        # WAVEファイルを探す（拡張子非依存）
+        content = self.text.get("1.0", tk.END)
+        wave_match = re.search(r"^WAVE:\s*([^\r\n#;\"']+)", content, re.MULTILINE | re.IGNORECASE)
+        
+        wave_path = None
+        wave_name = None
+        missing_files = []
+        
+        if wave_match:
+            wave_value = wave_match.group(1).strip().strip('"\'')
+            if wave_value:
+                wave_path, found = self.resolve_wave_path(wave_value, tja_dir)
+                if found:
+                    wave_name = os.path.basename(wave_path)
+                else:
+                    missing_files.append(wave_value)
 
         # 画像ファイルを自動収集（png/jpg/jpeg/gif/bmp）
         image_exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
@@ -1756,8 +1764,12 @@ class TJAEditor:
         for f in os.listdir(tja_dir):
             if f.lower().endswith(image_exts):
                 full_path = os.path.join(tja_dir, f)
-                if os.path.isfile(full_path) and f.lower() not in [tja_name.lower(), wave_name.lower()]:
-                    extra_files.append(full_path)
+                if os.path.isfile(full_path):
+                    # wave_nameが存在する場合のみ比較
+                    if wave_name and f.lower() == wave_name.lower():
+                        continue
+                    if f.lower() != tja_name.lower():
+                        extra_files.append(full_path)
 
         # 保存先を選択
         zip_path = filedialog.asksaveasfilename(
@@ -1773,23 +1785,44 @@ class TJAEditor:
         try:
             import zipfile
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                # TJAファイルは必ず含める
                 zf.write(tja_path, arcname=tja_name)
-                zf.write(wave_path, arcname=wave_name)
+                
+                # 音源ファイルが見つかっていれば含める
+                if wave_path and wave_name:
+                    zf.write(wave_path, arcname=wave_name)
+                
+                # 画像ファイルを含める
                 for img_path in extra_files:
                     zf.write(img_path, arcname=os.path.basename(img_path))
 
             # 完了メッセージ
-            file_list = f"・{tja_name}\n・{wave_name}"
+            file_list = f"・{tja_name}"
+            if wave_name:
+                file_list += f"\n・{wave_name}"
+            
             if extra_files:
                 file_list += "\n・" + "\n・".join(os.path.basename(p) for p in extra_files)
-            else:
-                file_list += "\n（画像ファイルは検出されませんでした）"
+            
+            # 警告メッセージの追加
+            warning_msg = ""
+            if missing_files:
+                warning_msg = "\n\n【警告】以下の音源ファイルが見つからなかったため、ZIPに含まれていません:\n"
+                warning_msg += "\n".join(f"・{f}" for f in missing_files)
+            elif not wave_name:
+                warning_msg = "\n\n【警告】音源ファイルが検出されませんでした"
+            
+            if not extra_files:
+                if not warning_msg:
+                    warning_msg = "\n\n"
+                warning_msg += "\n（画像ファイルは検出されませんでした）"
 
             messagebox.showinfo(
                 "配布用ZIP作成完了",
                 f"以下のファイルを含むZIPを作成しました。\n\n"
                 f"{os.path.basename(zip_path)}\n\n"
-                f"{file_list}\n\n"
+                f"{file_list}"
+                f"{warning_msg}\n\n"
                 f"このままアップロード可能です。"
             )
 
@@ -1828,6 +1861,47 @@ class TJAEditor:
         if self.current_file:
             return os.path.join(os.path.dirname(self.current_file), wave_name)
         return wave_name
+    
+    def resolve_wave_path(self, wave_name, base_dir=None):
+        """
+        音源ファイルパスを解決する共通関数（拡張子に依存しない）
+        
+        Args:
+            wave_name: WAVE: 行から取得した音源ファイル名
+            base_dir: 基準となるディレクトリ（TJAファイルのあるフォルダなど）
+        
+        Returns:
+            tuple: (resolved_path, found)
+                - resolved_path: 解決されたパス（見つからない場合は推測パス）
+                - found: ファイルが見つかったかどうか (True/False)
+        """
+        if not wave_name or not wave_name.strip():
+            return (None, False)
+        
+        wave_name = wave_name.strip().strip('"\'')
+        
+        # 1. 絶対パスならそのまま確認
+        if os.path.isabs(wave_name):
+            if os.path.exists(wave_name):
+                return (wave_name, True)
+            else:
+                return (wave_name, False)
+        
+        # 2. 基準ディレクトリからの相対パス
+        if base_dir:
+            candidate = os.path.join(base_dir, wave_name)
+            if os.path.exists(candidate):
+                return (candidate, True)
+        
+        # 3. カレントディレクトリからの相対パス
+        candidate = os.path.join(os.getcwd(), wave_name)
+        if os.path.exists(candidate):
+            return (candidate, True)
+        
+        # 見つからなかった場合は、基準ディレクトリを使った推測パスを返す
+        if base_dir:
+            return (os.path.join(base_dir, wave_name), False)
+        return (wave_name, False)
     
     def _apply_offset_to_tja(self, offset_value):
         """共通のOFFSET書き込み処理（再利用可能）"""
@@ -6373,49 +6447,50 @@ class TJAEditor:
             with open(save_path, "w", encoding="cp932", newline="\n") as f:
                 f.write(tja_text)
     
-            # 2. #NEXTSONGから音源名を取得してコピー
+            # 2. #NEXTSONGから音源名を取得してコピー（拡張子非依存対応）
             copied_files = []
+            missing_files = []
             dest_folder = os.path.dirname(save_path)
         
             for i, data in enumerate(song_data):
-                ogg_name = data["wave"].strip()
-                if not ogg_name:
-                    continue
-                if not ogg_name.lower().endswith(".ogg"):
+                wave_name = data["wave"].strip()
+                if not wave_name or wave_name == "-":
                     continue
         
+                # 音源パスを解決
                 source_tja_folder = os.path.dirname(self.song_paths[i])
-                source_ogg_path = os.path.join(source_tja_folder, ogg_name)
+                wave_path, found = self.resolve_wave_path(wave_name, source_tja_folder)
         
-                if not os.path.exists(source_ogg_path):
-                    if os.path.isabs(ogg_name) and os.path.exists(ogg_name):
-                        source_ogg_path = ogg_name
-                    else:
-                        continue
+                if not found:
+                    # 見つからない場合は記録して次へ
+                    missing_files.append(wave_name)
+                    continue
         
-                dest_ogg_path = os.path.join(dest_folder, ogg_name)
+                dest_wave_path = os.path.join(dest_folder, wave_name)
         
                 # すでに同じ場所にある場合はコピーしない
-                if os.path.abspath(source_ogg_path) == os.path.abspath(dest_ogg_path):
-                    copied_files.append(ogg_name)
+                if os.path.abspath(wave_path) == os.path.abspath(dest_wave_path):
+                    copied_files.append(wave_name)
                     continue
         
+                # コピーを試行
                 try:
-                    shutil.copy2(source_ogg_path, dest_ogg_path)
-                    copied_files.append(ogg_name)
+                    shutil.copy2(wave_path, dest_wave_path)
+                    copied_files.append(wave_name)
                 except Exception as e:
-                    messagebox.showwarning(
-                        "コピー失敗",
-                        f"{ogg_name} のコピーに失敗しました。\n{e}",
-                        parent=self.dan_window,
-                    )
+                    # コピー失敗も不足として記録
+                    missing_files.append(f"{wave_name} (コピー失敗: {e})")
     
-            # 3. 完了メッセージ
+            # 3. 完了メッセージ（コピー成功と失敗の両方を表示）
             msg = f"段位道場TJAを保存しました！\n\n{os.path.basename(save_path)}"
+            
             if copied_files:
-                msg += f"\n\n以下の音源も自動でコピーしました\n" + "\n".join(f"・{f}" for f in copied_files)
-            else:
-                msg += "\n\n（.ogg音源は見つかりませんでした）"
+                msg += f"\n\n【コピーした音源ファイル】\n" + "\n".join(f"・{f}" for f in copied_files)
+            
+            if missing_files:
+                msg += f"\n\n【見つからなかった/コピーできなかった音源】\n" + "\n".join(f"・{f}" for f in missing_files)
+            elif not copied_files:
+                msg += "\n\n（音源ファイルは検出されませんでした）"
     
             messagebox.showinfo("保存完了", msg, parent=self.dan_window)
     
