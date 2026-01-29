@@ -1813,8 +1813,6 @@ class TJAEditor:
                 warning_msg = "\n\n【警告】音源ファイルが検出されませんでした"
             
             if not extra_files:
-                if not warning_msg:
-                    warning_msg = "\n\n"
                 warning_msg += "\n（画像ファイルは検出されませんでした）"
 
             messagebox.showinfo(
@@ -6448,13 +6446,18 @@ class TJAEditor:
                 f.write(tja_text)
     
             # 2. #NEXTSONGから音源名を取得してコピー（拡張子非依存対応）
-            copied_files = []
-            missing_files = []
+            copied_files = []  # 実際にコピーしたファイル
+            skipped_files = []  # 既に存在していたファイル
+            missing_files = []  # 見つからなかったファイル
             dest_folder = os.path.dirname(save_path)
         
             for i, data in enumerate(song_data):
                 wave_name = data["wave"].strip()
                 if not wave_name or wave_name == "-":
+                    continue
+        
+                # 既に処理済みのファイルはスキップ（重複防止）
+                if wave_name in copied_files or wave_name in skipped_files or wave_name in missing_files:
                     continue
         
                 # 音源パスを解決
@@ -6470,7 +6473,7 @@ class TJAEditor:
         
                 # すでに同じ場所にある場合はコピーしない
                 if os.path.abspath(wave_path) == os.path.abspath(dest_wave_path):
-                    copied_files.append(wave_name)
+                    skipped_files.append(wave_name)
                     continue
         
                 # コピーを試行
@@ -6484,12 +6487,16 @@ class TJAEditor:
             # 3. 完了メッセージ（コピー成功と失敗の両方を表示）
             msg = f"段位道場TJAを保存しました！\n\n{os.path.basename(save_path)}"
             
-            if copied_files:
-                msg += f"\n\n【コピーした音源ファイル】\n" + "\n".join(f"・{f}" for f in copied_files)
+            if copied_files or skipped_files:
+                msg += "\n\n【使用した音源ファイル】"
+                if copied_files:
+                    msg += "\n" + "\n".join(f"・{f} (コピー済み)" for f in copied_files)
+                if skipped_files:
+                    msg += "\n" + "\n".join(f"・{f} (既に存在)" for f in skipped_files)
             
             if missing_files:
                 msg += f"\n\n【見つからなかった/コピーできなかった音源】\n" + "\n".join(f"・{f}" for f in missing_files)
-            elif not copied_files:
+            elif not copied_files and not skipped_files:
                 msg += "\n\n（音源ファイルは検出されませんでした）"
     
             messagebox.showinfo("保存完了", msg, parent=self.dan_window)
